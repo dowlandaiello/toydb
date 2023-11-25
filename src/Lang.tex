@@ -1,0 +1,94 @@
+% Created 2023-11-24 Fri 23:09
+% Intended LaTeX compiler: pdflatex
+\documentclass[11pt]{article}
+\usepackage[utf8]{inputenc}
+\usepackage[T1]{fontenc}
+\usepackage{graphicx}
+\usepackage{longtable}
+\usepackage{wrapfig}
+\usepackage{rotating}
+\usepackage[normalem]{ulem}
+\usepackage{amsmath}
+\usepackage{amssymb}
+\usepackage{capt-of}
+\usepackage{hyperref}
+\author{Dowland Aiello}
+\date{11/24/23}
+\title{ToyDB Combined DDL and DML Syntax Specification}
+\hypersetup{
+ pdfauthor={Dowland Aiello},
+ pdftitle={ToyDB Combined DDL and DML Syntax Specification},
+ pdfkeywords={},
+ pdfsubject={},
+ pdfcreator={Emacs 29.1 (Org mode 9.6.6)}, 
+ pdflang={English}}
+\begin{document}
+
+\maketitle
+\tableofcontents
+
+
+\section{Grammar}
+\label{sec:orgb6f56cc}
+\subsection{Expressions}
+\label{sec:org84e0d0f}
+
+\begin{verbatim}
+expression ::= list | atom
+\end{verbatim}
+
+\subsection{Atom}
+\label{sec:org0f59864}
+
+\begin{verbatim}
+atom ::= number | symbol | string
+\end{verbatim}
+
+\subsection{Number}
+\label{sec:orgae9f59b}
+
+\begin{verbatim}
+number ::= [+-]?['0'-'9']+
+\end{verbatim}
+
+\subsection{Symbol}
+\label{sec:org1f8b2f9}
+
+\begin{verbatim}
+symbol ::= ['A'-'Z']['A'-'Z''0'-'9'].*
+\end{verbatim}
+
+\subsection{String}
+\label{sec:org829a99f}
+
+\begin{verbatim}
+string ::= '"'['A'-'z''0-'9'].*'"'
+\end{verbatim}
+
+\subsection{List}
+\label{sec:org789128f}
+
+\begin{verbatim}
+list ::= '(', expression*, ')'
+\end{verbatim}
+
+\section{Semantics}
+\label{sec:orgf15e18b}
+
+Several built-in symbols carry unique significance. These symbols represent built-in functions that are meant to be called first in list-position. These include:
+
+\subsection{\texttt{create\_database}}
+\label{sec:orgab16526}
+
+Instruction creating a database, expects a string argument representing the name of the database.
+
+\subsection{\texttt{create\_table}}
+\label{sec:org3991051}
+
+Instruction creating a table in a database, expects a string argument representing the name of the database, a string argument representing the name of the table, a list of strings representing the names of the columns in the database, and a list of symbols representing the names of the types of each column in the database.
+
+\subsection{\texttt{insert\_into\_table}}
+\label{sec:orgaedf64f}
+
+Instruction inserting values into a table in a database, expects a string argument representing the name of the database, a string argument representing the name of the table, a list of strings representing the columns to insert values into, and a list of numbers or strings representing the values to insert into the columns
+\end{document}

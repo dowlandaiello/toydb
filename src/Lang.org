@@ -1,0 +1,56 @@
+#+TITLE: ToyDB Combined DDL and DML Syntax Specification
+#+AUTHOR: Dowland Aiello
+#+DATE: 11/24/23
+
+* Grammar
+** Expressions
+
+#+BEGIN_SRC
+expression ::= list | atom
+#+END_SRC
+
+** Atom
+
+#+BEGIN_SRC
+atom ::= number | symbol | string
+#+END_SRC
+
+** Number
+
+#+BEGIN_SRC
+number ::= [+-]?['0'-'9']+
+#+END_SRC
+
+** Symbol
+
+#+BEGIN_SRC
+symbol ::= ['A'-'Z']['A'-'Z''0'-'9'].*
+#+END_SRC
+
+** String
+
+#+BEGIN_SRC
+string ::= '"'['A'-'z''0-'9'].*'"'
+#+END_SRC
+
+** List
+
+#+BEGIN_SRC
+list ::= '(', expression*, ')'
+#+END_SRC
+
+* Semantics
+
+Several built-in symbols carry unique significance. These symbols represent built-in functions that are meant to be called first in list-position. These include:
+
+**  ~create_database~
+
+Instruction creating a database, expects a string argument representing the name of the database.
+
+** ~create_table~
+
+Instruction creating a table in a database, expects a string argument representing the name of the database, a string argument representing the name of the table, a list of lists of strings and symbols representing the names and types of the columns in the database.
+
+** ~insert_into_table~
+
+Instruction inserting values into a table in a database, expects a string argument representing the name of the database, a string argument representing the name of the table, a list of strings representing the columns to insert values into, and a list of numbers or strings representing the values to insert into the columns

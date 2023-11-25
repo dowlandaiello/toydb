@@ -1,14 +1,9 @@
-pub fn add(left: usize, right: usize) -> usize {
-    left + right
-}
+pub mod engine;
+pub mod error;
+pub mod result;
+pub mod rpc;
+pub mod types;
+pub mod util;
 
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn it_works() {
-        let result = add(2, 2);
-        assert_eq!(result, 4);
-    }
-}
+/// The prefix name used to resolve XDG paths for configs and data.
+pub const XDG_APP_PREFIX: &str = "toydb";
