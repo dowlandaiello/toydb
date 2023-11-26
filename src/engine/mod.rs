@@ -1,17 +1,23 @@
-use super::{error::Error, types::table::TableName, util::fs};
-use actix::{
-    fut::{self, ActorFutureExt, ActorTryFutureExt},
-    Actor, Addr, AsyncContext, Context, Handler, ResponseActFuture, WrapFuture,
-};
-use cmd::ddl::CreateDatabase;
-use std::{collections::HashMap, future};
-use tokio::fs::{File, OpenOptions};
+use super::error::Error;
+use actix::{Actor, Addr, Context, Handler, ResponseFuture};
+use buffer_pool::{BufferPool, DbHandle, GetBuffer};
+use cmd::ddl::{CreateDatabase, CreateTable};
+use std::default::Default;
 
+pub mod buffer_pool;
 pub mod cmd;
 
 /// The command processor for ToyDB.
 pub struct Engine {
-    buffer_pools: HashMap<TableName, Addr<DbHandle>>,
+    buffer_pool: Addr<BufferPool>,
+}
+
+impl Default for Engine {
+    fn default() -> Self {
+        Self {
+            buffer_pool: BufferPool::start_default(),
+        }
+    }
 }
 
 impl Actor for Engine {
@@ -19,49 +25,25 @@ impl Actor for Engine {
 }
 
 impl Handler<CreateDatabase> for Engine {
-    type Result = ResponseActFuture<Self, Result<Addr<DbHandle>, Error>>;
+    type Result = ResponseFuture<Result<Addr<DbHandle>, Error>>;
 
     fn handle(&mut self, msg: CreateDatabase, _ctx: &mut Context<Self>) -> Self::Result {
-        // If the buffer pool is already open, return it
-        if let Some(handle) = self.buffer_pools.get(&msg.0) {
-            return Box::pin(future::ready(Ok(handle.clone())).into_actor(self));
-        }
-
-        // Obtain the path for the database to use
-        let db_path = match fs::db_file_path_with_name(msg.0.as_str()) {
-            Ok(p) => p,
-            Err(e) => {
-                return Box::pin(future::ready(Err(e)).into_actor(self));
-            }
-        };
-
-        // Open the database file, or create it if it doesn't exist
-        let open_fut = async move {
-            OpenOptions::new()
-                .read(true)
-                .write(true)
-                .create(true)
-                .open(db_path)
-                .await
-        }
-        .into_actor(self)
-        .map_ok(|f, slf, _ctx| {
-            let act = DbHandle { handle: f }.start();
-            slf.buffer_pools.insert(msg.0, act.clone());
-
-            act
-        })
-        .map_err(|e, _, _| Error::IoError(e));
-
-        Box::pin(open_fut)
+        let req = self.buffer_pool.send(GetBuffer(msg.0));
+        Box::pin(async move { req.await.map_err(|e| Error::MailboxError(e))? })
     }
 }
 
-/// An open instance of a database (i.e., a buffer pool).
-pub struct DbHandle {
-    handle: File,
-}
+impl Handler<CreateTable> for Engine {
+    type Result = ResponseFuture<Result<(), Error>>;
 
-impl Actor for DbHandle {
-    type Context = Context<Self>;
+    fn handle(&mut self, msg: CreateTable, _ctx: &mut Context<Self>) -> Self::Result {
+        // Obtain a buffer from the buffer pool
+        let req_buff = self.buffer_pool.send(GetBuffer(msg.0));
+        Box::pin(async move {
+            let buff = req_buff.await.map_err(|e| Error::MailboxError(e))??;
+
+            // Ask the buffer to create a table
+            buff.send(msg).await.map_err(|e| Error::MailboxError(e))?
+        })
+    }
 }

@@ -1,3 +1,4 @@
+use actix::MailboxError;
 use std::{error::Error as StdError, fmt};
 use tokio::io::Error as IoError;
 use xdg::BaseDirectoriesError;
@@ -6,6 +7,7 @@ use xdg::BaseDirectoriesError;
 pub enum Error {
     XdgError(BaseDirectoriesError),
     IoError(IoError),
+    MailboxError(MailboxError),
 }
 
 impl fmt::Display for Error {
@@ -17,6 +19,7 @@ impl fmt::Display for Error {
                 e
             ),
             Self::IoError(e) => write!(f, "encountered an IO error: {:?}", e),
+            Self::MailboxError(e) => write!(f, "encountered an actor mailbox error: {:?}", e),
         }
     }
 }
@@ -26,6 +29,7 @@ impl StdError for Error {
         match self {
             Self::XdgError(e) => Some(e),
             Self::IoError(e) => Some(e),
+            Self::MailboxError(e) => Some(e),
         }
     }
 }
