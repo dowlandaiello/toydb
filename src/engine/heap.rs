@@ -1,13 +1,13 @@
 use super::{
-    super::error::Error,
-    buffer_pool::{DbHandle, LoadHead, NewPage, PAGE_SIZE},
+    super::{error::Error, types::db::RecordId},
+    buffer_pool::{DbHandle, LoadHead, NewPage, WritePage, PAGE_SIZE},
 };
 use actix::{Actor, Addr, Context, Handler, Message, ResponseFuture};
 use std::future;
 
 /// Inserts a record at the end of the heap file.
 #[derive(Message)]
-#[rtype(result = "Result<(), Error>")]
+#[rtype(result = "Result<RecordId, Error>")]
 pub struct InsertRecord(Vec<u8>);
 
 /// An open heap abstraction.
@@ -24,7 +24,7 @@ impl Actor for HeapHandle {
 }
 
 impl Handler<InsertRecord> for HeapHandle {
-    type Result = ResponseFuture<Result<(), Error>>;
+    type Result = ResponseFuture<Result<RecordId, Error>>;
 
     fn handle(&mut self, msg: InsertRecord, _ctx: &mut Context<Self>) -> Self::Result {
         // The record must not be larger than the size of a page
@@ -32,30 +32,41 @@ impl Handler<InsertRecord> for HeapHandle {
             return Box::pin(future::ready(Err(Error::PageOutOfBounds)));
         }
 
-        // Load the last page in the file, or create a new one
-        let req = self.buffer.send(LoadHead);
-
-        let req_new_page = self.buffer.send(NewPage);
-        let req_bigger_page = self.buffer.send(NewPage);
+        let buff = self.buffer.clone();
 
         // Allocate a new page if the page cannot fit the record
         Box::pin(async move {
-            let mut page = if let Some(page) = req.await.map_err(|e| Error::MailboxError(e))?? {
+            // Load the last page in the file, or create a new one
+            let (mut page, mut page_index) = if let Some(page) = buff
+                .send(LoadHead)
+                .await
+                .map_err(|e| Error::MailboxError(e))??
+            {
                 page
             } else {
-                req_new_page.await.map_err(|e| Error::MailboxError(e))??
+                buff.send(NewPage)
+                    .await
+                    .map_err(|e| Error::MailboxError(e))??
             };
 
             // Check if there is space in the page. If not, allocate a new buffer
-            if msg.0.len() > PAGE_SIZE - page.space_used().unwrap_or(0) {
-                page = req_bigger_page
+            if msg.0.len() > PAGE_SIZE - page.space_used().unwrap_or_default() {
+                (page, page_index) = buff
+                    .send(NewPage)
                     .await
                     .map_err(|e| Error::MailboxError(e))??;
             }
 
             // Insert the record
+            let idx = page.append(msg.0.as_slice())?;
+            buff.send(WritePage(page_index, page))
+                .await
+                .map_err(|e| Error::MailboxError(e))??;
 
-            Ok(())
+            Ok(RecordId {
+                page: page_index,
+                page_idx: idx,
+            })
         })
     }
 }

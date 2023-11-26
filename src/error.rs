@@ -10,6 +10,7 @@ pub enum Error {
     MailboxError(MailboxError),
     PageOutOfBounds,
     MutexError,
+    ConversionError,
 }
 
 impl fmt::Display for Error {
@@ -24,6 +25,7 @@ impl fmt::Display for Error {
             Self::MailboxError(e) => write!(f, "encountered an actor mailbox error: {:?}", e),
             Self::PageOutOfBounds => write!(f, "the record is larger than a page"),
             Self::MutexError => write!(f, "encountered a mutex error"),
+            Self::ConversionError => write!(f, "encountered a type conversion error"),
         }
     }
 }
@@ -35,6 +37,7 @@ impl StdError for Error {
             Self::IoError(e) => Some(e),
             Self::MailboxError(e) => Some(e),
             Self::PageOutOfBounds | Self::MutexError => None,
+            Self::ConversionError => None,
         }
     }
 }

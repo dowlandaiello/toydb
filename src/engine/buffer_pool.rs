@@ -1,6 +1,6 @@
 use super::super::{
     error::Error,
-    types::db::{DbName, PageIndex},
+    types::db::{DbName, PageId},
     util::fs,
 };
 use actix::{
@@ -37,14 +37,14 @@ impl Page {
     }
 
     /// Calculates the number of bytes used in the page.
-    pub fn space_used(&self) -> Option<usize> {
-        let lock = self.0.lock().ok()?;
+    pub fn space_used(&self) -> Result<usize, Error> {
+        let lock = self.0.lock().map_err(|_| Error::MutexError)?;
 
         let bytes: [u8; mem::size_of::<usize>()] = (&lock[PAGE_SIZE - mem::size_of::<usize>()..])
             .try_into()
-            .ok()?;
+            .map_err(|_| Error::ConversionError)?;
 
-        Some(usize::from_le_bytes(bytes))
+        Ok(usize::from_le_bytes(bytes))
     }
 
     // Determines the absolute index in the page's bytes corresponding to an index of records
@@ -73,21 +73,12 @@ impl Page {
         })
     }
 
-    /// Appends the record to the page.
-    pub fn append(&self, val: &[u8]) {
-        let space_used = if let Some(used) = self.space_used() {
-            used
-        } else {
-            return;
-        };
+    /// Appends the record to the page, returning the index of the value in the page.
+    pub fn append(&self, val: &[u8]) -> Result<usize, Error> {
+        let mut lock = self.0.lock().map_err(|_| Error::MutexError)?;
+        let space_used = self.space_used()?;
 
-        let mut lock = if let Some(lock) = self.0.lock().ok() {
-            lock
-        } else {
-            return;
-        };
-
-        let size: usize = val.len() + space_used;
+        let size: usize = mem::size_of::<usize>() + val.len() + space_used;
         let size_bytes: [u8; mem::size_of::<usize>()] = size.to_le_bytes();
 
         // Update the space used header
@@ -95,10 +86,20 @@ impl Page {
             lock[i] = size_bytes[i];
         }
 
+        // Add the value's size header
+        let size_local: usize = mem::size_of::<usize>() + val.len();
+        let size_bytes: [u8; mem::size_of::<usize>()] = size_local.to_le_bytes();
+
+        for i in 0..(mem::size_of::<usize>()) {
+            lock[space_used + i] = size_bytes[i];
+        }
+
         // Add the value
         for i in 0..val.len() {
-            lock[space_used + i] = val[i];
+            lock[space_used + mem::size_of::<usize>() + i] = val[i];
         }
+
+        Ok(space_used)
     }
 }
 
@@ -110,22 +111,22 @@ pub struct GetBuffer(pub DbName);
 /// A request to load a page from the heap file.
 #[derive(Message)]
 #[rtype(result = "Result<Page, Error>")]
-pub struct LoadPage(pub PageIndex);
+pub struct LoadPage(pub PageId);
 
 /// A request to load the last page in the heap file.
 #[derive(Message)]
-#[rtype(result = "Result<Option<Page>, Error>")]
+#[rtype(result = "Result<Option<(Page, PageId)>, Error>")]
 pub struct LoadHead;
 
 /// A request to create a new page in the heap file.
 #[derive(Message)]
-#[rtype(result = "Result<Page, Error>")]
+#[rtype(result = "Result<(Page, PageId), Error>")]
 pub struct NewPage;
 
 /// A request to write a page to a heap file.
 #[derive(Message)]
 #[rtype(result = "Result<(), Error>")]
-pub struct WritePage(pub PageIndex, pub Page);
+pub struct WritePage(pub PageId, pub Page);
 
 /// A pool of buffers for databases.
 #[derive(Default)]
@@ -235,7 +236,7 @@ impl Handler<LoadPage> for DbHandle {
 }
 
 impl Handler<LoadHead> for DbHandle {
-    type Result = ResponseFuture<Result<Option<Page>, Error>>;
+    type Result = ResponseFuture<Result<Option<(Page, PageId)>, Error>>;
 
     fn handle(&mut self, _msg: LoadHead, ctx: &mut Context<Self>) -> Self::Result {
         if self.pages.is_empty() {
@@ -250,13 +251,13 @@ impl Handler<LoadHead> for DbHandle {
             addr.send(LoadPage(head_idx))
                 .await
                 .map_err(|e| Error::MailboxError(e))?
-                .map(|page| Some(page))
+                .map(|page| Some((page, head_idx)))
         })
     }
 }
 
 impl Handler<NewPage> for DbHandle {
-    type Result = ResponseFuture<Result<Page, Error>>;
+    type Result = ResponseFuture<Result<(Page, PageId), Error>>;
 
     fn handle(&mut self, _msg: NewPage, ctx: &mut Context<Self>) -> Self::Result {
         // Create the page in memory
@@ -274,7 +275,7 @@ impl Handler<NewPage> for DbHandle {
                 .map_err(|e| Error::MailboxError(e))
                 .await??;
 
-            Ok(page)
+            Ok((page, head_idx))
         })
     }
 }
