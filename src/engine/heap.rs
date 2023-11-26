@@ -1,8 +1,9 @@
 use super::{
     super::error::Error,
-    buffer_pool::{DbHandle, PAGE_SIZE},
+    buffer_pool::{DbHandle, LoadHead, PAGE_SIZE},
 };
-use actix::{Actor, Addr, Context, Handler, Message, ResponseActFuture};
+use actix::{Actor, Addr, Context, Handler, Message, ResponseFuture};
+use std::future;
 
 /// Inserts a record at the end of the heap file.
 #[derive(Message)]
@@ -23,14 +24,24 @@ impl Actor for HeapHandle {
 }
 
 impl Handler<InsertRecord> for HeapHandle {
-    type Result = ResponseActFuture<Self, Result<(), Error>>;
+    type Result = ResponseFuture<Result<(), Error>>;
 
     fn handle(&mut self, msg: InsertRecord, _ctx: &mut Context<Self>) -> Self::Result {
         // The record must not be larger than the size of a page
         if msg.0.len() > PAGE_SIZE {
-            return Box::pin(future::ready(Err(Error::PageOutOfBounds)).into_actor(self));
+            return Box::pin(future::ready(Err(Error::PageOutOfBounds)));
         }
 
         // Allocate a new page if the page cannot fit the record
+        Box::pin(async move {
+            // Load the last page in the file
+            let page = self
+                .buffer
+                .send(LoadHead)
+                .await
+                .map_err(|e| Error::MailboxError(e))??;
+
+            Ok(())
+        })
     }
 }

@@ -4,8 +4,8 @@ use super::super::{
     util::fs,
 };
 use actix::{
-    fut::ActorTryFutureExt, Actor, Addr, Context, Handler, Message, ResponseActFuture,
-    ResponseFuture, WrapFuture,
+    fut::ActorTryFutureExt, Actor, Addr, AsyncContext, Context, Handler, Message,
+    ResponseActFuture, ResponseFuture, WrapFuture,
 };
 use futures::future::TryFutureExt;
 use std::{collections::HashMap, future, mem, sync::Arc};
@@ -18,9 +18,14 @@ use tokio::{
 pub const PAGE_SIZE: usize = 8_000;
 
 /// A fixed-size page of 8kB.
+#[derive(Clone)]
 pub struct Page(Arc<[u8; PAGE_SIZE]>);
 
 impl Page {
+    pub fn new(contents: [u8; PAGE_SIZE]) -> Self {
+        Self(Arc::new(contents))
+    }
+
     /// Calculates the number of bytes used in the page.
     pub fn space_used(&self) -> Option<usize> {
         let bytes: [u8; mem::size_of::<usize>()] = (&self.0[PAGE_SIZE - mem::size_of::<usize>()..])
@@ -45,6 +50,7 @@ impl Page {
         }
     }
 
+    /// Gets the contents of the ith record
     pub fn get(&self, i: usize) -> Option<&[u8]> {
         let (pos, size) = self.follow_to_index(0, 0, i)?;
         Some(&self.0[pos..pos + size])
@@ -60,6 +66,11 @@ pub struct GetBuffer(pub DbName);
 #[derive(Message)]
 #[rtype(result = "Result<Page, Error>")]
 pub struct LoadPage(pub PageIndex);
+
+/// A request to load the last page in the heap file.
+#[derive(Message)]
+#[rtype(result = "Result<Page, Error>")]
+pub struct LoadHead;
 
 /// A request to write a page to a heap file.
 #[derive(Message)]
@@ -154,7 +165,7 @@ impl Handler<LoadPage> for DbHandle {
             let mut buff = [0; PAGE_SIZE];
             handle.read_exact(&mut buff).await?;
 
-            Ok(Arc::new(buff))
+            Ok(Page::new(buff))
         }
         .into_actor(self)
         .map_err(|e, _, _| Error::IoError(e))
@@ -165,6 +176,20 @@ impl Handler<LoadPage> for DbHandle {
         });
 
         Box::pin(read_fut)
+    }
+}
+
+impl Handler<LoadHead> for DbHandle {
+    type Result = ResponseFuture<Result<Page, Error>>;
+
+    fn handle(&mut self, msg: LoadHead, ctx: &mut Context<Self>) -> Self::Result {
+        // Load the last page currently open
+        Box::pin(async move {
+            ctx.address()
+                .send(LoadPage(self.pages.len() - 1))
+                .await
+                .map_err(|e| Error::MailboxError(e))?
+        })
     }
 }
 
