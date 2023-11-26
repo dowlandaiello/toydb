@@ -8,7 +8,11 @@ use actix::{
     ResponseActFuture, ResponseFuture, WrapFuture,
 };
 use futures::future::TryFutureExt;
-use std::{collections::HashMap, future, mem, sync::Arc};
+use std::{
+    collections::HashMap,
+    future, mem,
+    sync::{Arc, Mutex},
+};
 use tokio::{
     fs::{File, OpenOptions},
     io::{AsyncReadExt, AsyncSeekExt, AsyncWriteExt, SeekFrom},
@@ -19,16 +23,24 @@ pub const PAGE_SIZE: usize = 8_000;
 
 /// A fixed-size page of 8kB.
 #[derive(Clone)]
-pub struct Page(Arc<[u8; PAGE_SIZE]>);
+pub struct Page(Arc<Mutex<[u8; PAGE_SIZE]>>);
+
+impl Default for Page {
+    fn default() -> Self {
+        Self(Arc::new(Mutex::new([0; PAGE_SIZE])))
+    }
+}
 
 impl Page {
     pub fn new(contents: [u8; PAGE_SIZE]) -> Self {
-        Self(Arc::new(contents))
+        Self(Arc::new(Mutex::new(contents)))
     }
 
     /// Calculates the number of bytes used in the page.
     pub fn space_used(&self) -> Option<usize> {
-        let bytes: [u8; mem::size_of::<usize>()] = (&self.0[PAGE_SIZE - mem::size_of::<usize>()..])
+        let lock = self.0.lock().ok()?;
+
+        let bytes: [u8; mem::size_of::<usize>()] = (&lock[PAGE_SIZE - mem::size_of::<usize>()..])
             .try_into()
             .ok()?;
 
@@ -37,10 +49,12 @@ impl Page {
 
     // Determines the absolute index in the page's bytes corresponding to an index of records
     fn follow_to_index(&self, raw_pos: usize, curr: usize, index: usize) -> Option<(usize, usize)> {
-        let record_size_bytes: [u8; mem::size_of::<usize>()] = (&self.0
-            [raw_pos..raw_pos + mem::size_of::<usize>()])
-            .try_into()
-            .ok()?;
+        let record_size_bytes: [u8; mem::size_of::<usize>()] = {
+            let lock = self.0.lock().ok()?;
+            (&lock[raw_pos..raw_pos + mem::size_of::<usize>()])
+                .try_into()
+                .ok()?
+        };
         let record_size = usize::from_le_bytes(record_size_bytes);
 
         if curr == index {
@@ -51,9 +65,40 @@ impl Page {
     }
 
     /// Gets the contents of the ith record
-    pub fn get(&self, i: usize) -> Option<&[u8]> {
+    pub fn get(&self, i: usize) -> Option<Vec<u8>> {
         let (pos, size) = self.follow_to_index(0, 0, i)?;
-        Some(&self.0[pos..pos + size])
+        Some({
+            let lock = self.0.lock().ok()?;
+            (&lock[pos..pos + size]).to_owned()
+        })
+    }
+
+    /// Appends the record to the page.
+    pub fn append(&self, val: &[u8]) {
+        let space_used = if let Some(used) = self.space_used() {
+            used
+        } else {
+            return;
+        };
+
+        let mut lock = if let Some(lock) = self.0.lock().ok() {
+            lock
+        } else {
+            return;
+        };
+
+        let size: usize = val.len() + space_used;
+        let size_bytes: [u8; mem::size_of::<usize>()] = size.to_le_bytes();
+
+        // Update the space used header
+        for i in 0..size_bytes.len() {
+            lock[i] = size_bytes[i];
+        }
+
+        // Add the value
+        for i in 0..val.len() {
+            lock[space_used + i] = val[i];
+        }
     }
 }
 
@@ -69,8 +114,13 @@ pub struct LoadPage(pub PageIndex);
 
 /// A request to load the last page in the heap file.
 #[derive(Message)]
-#[rtype(result = "Result<Page, Error>")]
+#[rtype(result = "Result<Option<Page>, Error>")]
 pub struct LoadHead;
+
+/// A request to create a new page in the heap file.
+#[derive(Message)]
+#[rtype(result = "Result<Page, Error>")]
+pub struct NewPage;
 
 /// A request to write a page to a heap file.
 #[derive(Message)]
@@ -120,8 +170,8 @@ impl Handler<GetBuffer> for BufferPool {
         .map_ok(|(f, meta), slf, _ctx| {
             // Create enough empty page slots to store the entire file's contents
             let act = DbHandle {
-                handle: f,
-                pages: vec![None; meta.len() as usize / PAGE_SIZE + 1],
+                handle: Arc::new(Mutex::new(f)),
+                pages: vec![None; f64::floor(meta.len() as f64 / (PAGE_SIZE as f64)) as usize],
             }
             .start();
             slf.pools.insert(msg.0, act.clone());
@@ -136,7 +186,7 @@ impl Handler<GetBuffer> for BufferPool {
 
 /// An open instance of a database (i.e., a buffer pool).
 pub struct DbHandle {
-    handle: File,
+    handle: Arc<Mutex<File>>,
     pages: Vec<Option<Page>>,
 }
 
@@ -147,29 +197,34 @@ impl Actor for DbHandle {
 impl Handler<LoadPage> for DbHandle {
     type Result = ResponseActFuture<Self, Result<Page, Error>>;
 
-    fn handle(&mut self, msg: LoadPage, ctx: &mut Context<Self>) -> Self::Result {
+    fn handle(&mut self, msg: LoadPage, _ctx: &mut Context<Self>) -> Self::Result {
         // If the page already exists, return it
         if let Some(Some(page)) = self.pages.get(msg.0) {
-            return Box::pin(future::ready(Ok(*page)).into_actor(self));
+            return Box::pin(future::ready(Ok(page.clone())).into_actor(self));
         };
+
+        let handle_lock = self.handle.clone();
 
         // Seek to the position in the file that the page is located at
         let read_fut = async move {
-            let handle = self.handle;
+            let mut handle = handle_lock.lock().map_err(|_| Error::MutexError)?;
 
             handle
                 .seek(SeekFrom::Start((msg.0 as usize * PAGE_SIZE) as u64))
-                .await?;
+                .await
+                .map_err(|e| Error::IoError(e))?;
 
             // Load the page
             let mut buff = [0; PAGE_SIZE];
-            handle.read_exact(&mut buff).await?;
+            handle
+                .read_exact(&mut buff)
+                .await
+                .map_err(|e| Error::IoError(e))?;
 
             Ok(Page::new(buff))
         }
         .into_actor(self)
-        .map_err(|e, _, _| Error::IoError(e))
-        .map_ok(|page, slf, _ctx| {
+        .map_ok(move |page, slf, _ctx| {
             slf.pages[msg.0] = Some(page.clone());
 
             page
@@ -180,15 +235,46 @@ impl Handler<LoadPage> for DbHandle {
 }
 
 impl Handler<LoadHead> for DbHandle {
-    type Result = ResponseFuture<Result<Page, Error>>;
+    type Result = ResponseFuture<Result<Option<Page>, Error>>;
 
-    fn handle(&mut self, msg: LoadHead, ctx: &mut Context<Self>) -> Self::Result {
+    fn handle(&mut self, _msg: LoadHead, ctx: &mut Context<Self>) -> Self::Result {
+        if self.pages.is_empty() {
+            return Box::pin(future::ready(Ok(None)));
+        }
+
+        let head_idx = self.pages.len() - 1;
+        let addr = ctx.address();
+
         // Load the last page currently open
         Box::pin(async move {
-            ctx.address()
-                .send(LoadPage(self.pages.len() - 1))
+            addr.send(LoadPage(head_idx))
                 .await
                 .map_err(|e| Error::MailboxError(e))?
+                .map(|page| Some(page))
+        })
+    }
+}
+
+impl Handler<NewPage> for DbHandle {
+    type Result = ResponseFuture<Result<Page, Error>>;
+
+    fn handle(&mut self, _msg: NewPage, ctx: &mut Context<Self>) -> Self::Result {
+        // Create the page in memory
+        let page = Page::default();
+
+        // Write the new page to memory
+        self.pages.push(Some(page.clone()));
+        let head_idx = self.pages.len() - 1;
+
+        let addr = ctx.address();
+
+        // Write the new page to the disk
+        Box::pin(async move {
+            addr.send(WritePage(head_idx, page.clone()))
+                .map_err(|e| Error::MailboxError(e))
+                .await??;
+
+            Ok(page)
         })
     }
 }
@@ -196,24 +282,30 @@ impl Handler<LoadHead> for DbHandle {
 impl Handler<WritePage> for DbHandle {
     type Result = ResponseFuture<Result<(), Error>>;
 
-    fn handle(&mut self, msg: WritePage, ctx: &mut Context<Self>) -> Self::Result {
+    fn handle(&mut self, msg: WritePage, _ctx: &mut Context<Self>) -> Self::Result {
         // Write the page to memory
-        self.pages[msg.0] = Some(msg.1);
+        self.pages[msg.0] = Some(msg.1.clone());
+
+        let handle_lock = self.handle.clone();
 
         // Commit the page to disk
         let write_fut = async move {
-            let handle = self.handle;
-
+            let mut handle = handle_lock.lock().map_err(|_| Error::MutexError)?;
             handle
                 .seek(SeekFrom::Start((msg.0 as usize * PAGE_SIZE) as u64))
-                .await?;
+                .await
+                .map_err(|e| Error::IoError(e))?;
+
+            let page_lock = msg.1 .0.lock().map_err(|_| Error::MutexError)?;
 
             // Write the page
-            handle.write_all(msg.1 .0.as_slice()).await?;
+            handle
+                .write_all(page_lock.as_slice())
+                .await
+                .map_err(|e| Error::IoError(e))?;
 
             Ok(())
-        }
-        .map_err(|e| Error::IoError(e));
+        };
 
         Box::pin(write_fut)
     }

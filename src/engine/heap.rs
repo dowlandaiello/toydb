@@ -1,6 +1,6 @@
 use super::{
     super::error::Error,
-    buffer_pool::{DbHandle, LoadHead, PAGE_SIZE},
+    buffer_pool::{DbHandle, LoadHead, NewPage, PAGE_SIZE},
 };
 use actix::{Actor, Addr, Context, Handler, Message, ResponseFuture};
 use std::future;
@@ -32,14 +32,28 @@ impl Handler<InsertRecord> for HeapHandle {
             return Box::pin(future::ready(Err(Error::PageOutOfBounds)));
         }
 
+        // Load the last page in the file, or create a new one
+        let req = self.buffer.send(LoadHead);
+
+        let req_new_page = self.buffer.send(NewPage);
+        let req_bigger_page = self.buffer.send(NewPage);
+
         // Allocate a new page if the page cannot fit the record
         Box::pin(async move {
-            // Load the last page in the file
-            let page = self
-                .buffer
-                .send(LoadHead)
-                .await
-                .map_err(|e| Error::MailboxError(e))??;
+            let mut page = if let Some(page) = req.await.map_err(|e| Error::MailboxError(e))?? {
+                page
+            } else {
+                req_new_page.await.map_err(|e| Error::MailboxError(e))??
+            };
+
+            // Check if there is space in the page. If not, allocate a new buffer
+            if msg.0.len() > PAGE_SIZE - page.space_used().unwrap_or(0) {
+                page = req_bigger_page
+                    .await
+                    .map_err(|e| Error::MailboxError(e))??;
+            }
+
+            // Insert the record
 
             Ok(())
         })

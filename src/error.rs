@@ -9,6 +9,7 @@ pub enum Error {
     IoError(IoError),
     MailboxError(MailboxError),
     PageOutOfBounds,
+    MutexError,
 }
 
 impl fmt::Display for Error {
@@ -22,6 +23,7 @@ impl fmt::Display for Error {
             Self::IoError(e) => write!(f, "encountered an IO error: {:?}", e),
             Self::MailboxError(e) => write!(f, "encountered an actor mailbox error: {:?}", e),
             Self::PageOutOfBounds => write!(f, "the record is larger than a page"),
+            Self::MutexError => write!(f, "encountered a mutex error"),
         }
     }
 }
@@ -32,7 +34,7 @@ impl StdError for Error {
             Self::XdgError(e) => Some(e),
             Self::IoError(e) => Some(e),
             Self::MailboxError(e) => Some(e),
-            Self::PageOutOfBounds => None,
+            Self::PageOutOfBounds | Self::MutexError => None,
         }
     }
 }
