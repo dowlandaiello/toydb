@@ -1,25 +1,55 @@
-use super::{
-    super::{
-        error::Error,
-        types::db::{DbName, PageIndex},
-        util::fs,
-    },
-    cmd::ddl::CreateTable,
+use super::super::{
+    error::Error,
+    types::db::{DbName, PageIndex},
+    util::fs,
 };
 use actix::{
-    fut::ActorTryFutureExt, Actor, Addr, Context, Handler, Message, ResponseActFuture, WrapFuture,
+    fut::ActorTryFutureExt, Actor, Addr, Context, Handler, Message, ResponseActFuture,
+    ResponseFuture, WrapFuture,
 };
-use std::{collections::HashMap, future, sync::Arc};
+use futures::future::TryFutureExt;
+use std::{collections::HashMap, future, mem, sync::Arc};
 use tokio::{
     fs::{File, OpenOptions},
-    io::{AsyncReadExt, AsyncSeekExt, SeekFrom},
+    io::{AsyncReadExt, AsyncSeekExt, AsyncWriteExt, SeekFrom},
 };
 
 /// The size of pages loaded from heap files in bytes.
 pub const PAGE_SIZE: usize = 8_000;
 
 /// A fixed-size page of 8kB.
-pub type Page = Arc<[u8; PAGE_SIZE]>;
+pub struct Page(Arc<[u8; PAGE_SIZE]>);
+
+impl Page {
+    /// Calculates the number of bytes used in the page.
+    pub fn space_used(&self) -> Option<usize> {
+        let bytes: [u8; mem::size_of::<usize>()] = (&self.0[PAGE_SIZE - mem::size_of::<usize>()..])
+            .try_into()
+            .ok()?;
+
+        Some(usize::from_le_bytes(bytes))
+    }
+
+    // Determines the absolute index in the page's bytes corresponding to an index of records
+    fn follow_to_index(&self, raw_pos: usize, curr: usize, index: usize) -> Option<(usize, usize)> {
+        let record_size_bytes: [u8; mem::size_of::<usize>()] = (&self.0
+            [raw_pos..raw_pos + mem::size_of::<usize>()])
+            .try_into()
+            .ok()?;
+        let record_size = usize::from_le_bytes(record_size_bytes);
+
+        if curr == index {
+            Some((raw_pos, record_size))
+        } else {
+            self.follow_to_index(raw_pos + record_size, curr + 1, index)
+        }
+    }
+
+    pub fn get(&self, i: usize) -> Option<&[u8]> {
+        let (pos, size) = self.follow_to_index(0, 0, i)?;
+        Some(&self.0[pos..pos + size])
+    }
+}
 
 /// A request to open or fetch an existing buffer for a database.
 #[derive(Message)]
@@ -30,6 +60,11 @@ pub struct GetBuffer(pub DbName);
 #[derive(Message)]
 #[rtype(result = "Result<Page, Error>")]
 pub struct LoadPage(pub PageIndex);
+
+/// A request to write a page to a heap file.
+#[derive(Message)]
+#[rtype(result = "Result<(), Error>")]
+pub struct WritePage(pub PageIndex, pub Page);
 
 /// A pool of buffers for databases.
 #[derive(Default)]
@@ -98,12 +133,6 @@ impl Actor for DbHandle {
     type Context = Context<Self>;
 }
 
-impl Handler<CreateTable> for DbHandle {
-    type Result = ResponseActFuture<Self, Result<(), Error>>;
-
-    fn handle(&mut self, msg: CreateTable, _ctx: &mut Context<Self>) -> Self::Result {}
-}
-
 impl Handler<LoadPage> for DbHandle {
     type Result = ResponseActFuture<Self, Result<Page, Error>>;
 
@@ -136,5 +165,31 @@ impl Handler<LoadPage> for DbHandle {
         });
 
         Box::pin(read_fut)
+    }
+}
+
+impl Handler<WritePage> for DbHandle {
+    type Result = ResponseFuture<Result<(), Error>>;
+
+    fn handle(&mut self, msg: WritePage, ctx: &mut Context<Self>) -> Self::Result {
+        // Write the page to memory
+        self.pages[msg.0] = Some(msg.1);
+
+        // Commit the page to disk
+        let write_fut = async move {
+            let handle = self.handle;
+
+            handle
+                .seek(SeekFrom::Start((msg.0 as usize * PAGE_SIZE) as u64))
+                .await?;
+
+            // Write the page
+            handle.write_all(msg.1 .0.as_slice()).await?;
+
+            Ok(())
+        }
+        .map_err(|e| Error::IoError(e));
+
+        Box::pin(write_fut)
     }
 }

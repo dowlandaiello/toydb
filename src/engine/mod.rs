@@ -6,6 +6,7 @@ use std::default::Default;
 
 pub mod buffer_pool;
 pub mod cmd;
+pub mod heap;
 
 /// The command processor for ToyDB.
 pub struct Engine {
@@ -41,9 +42,6 @@ impl Handler<CreateTable> for Engine {
         let req_buff = self.buffer_pool.send(GetBuffer(msg.0));
         Box::pin(async move {
             let buff = req_buff.await.map_err(|e| Error::MailboxError(e))??;
-
-            // Ask the buffer to create a table
-            buff.send(msg).await.map_err(|e| Error::MailboxError(e))?
         })
     }
 }
