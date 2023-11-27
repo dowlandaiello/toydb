@@ -20,6 +20,8 @@ Largely complete: see [[./src/engine/heap.rs][heap.rs]].
 
 *** TODO Indexing
 
+In progress: see [[./src/engine/index.rs][index.rs]].
+
 *** TODO Query Processor
 
 *** TODO Connection Manager
