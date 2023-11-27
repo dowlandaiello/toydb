@@ -124,6 +124,34 @@ impl Default for LeafNode {
 }
 
 impl LeafNode {
+    /// Returns whether or not there are any slots left in the leaf node
+    fn is_full(&self) -> bool {
+        fn is_full_helper(slf: &LeafNode) -> Option<bool> {
+            let mut rem = &slf.0[1 + (2 * mem::size_of::<u64>())..];
+
+            for _ in 0..ORDER {
+                // Look for a key-value pair that is zero that is not in the zeroth position
+                let key_bytes: [u8; mem::size_of::<u64>()] =
+                    (&rem[0..mem::size_of::<u64>()]).try_into().ok()?;
+                let val_bytes: [u8; RECORD_ID_SIZE] = (&rem
+                    [mem::size_of::<u64>()..(mem::size_of::<u64>() + RECORD_ID_SIZE)])
+                    .try_into()
+                    .ok()?;
+
+                // The position is empty
+                if key_bytes.iter().all(|x| x == &0) && val_bytes.iter().all(|x| x == &0) {
+                    return Some(false);
+                }
+
+                rem = &rem[mem::size_of::<u64>() + RECORD_ID_SIZE..];
+            }
+
+            Some(true)
+        }
+
+        is_full_helper(self).unwrap_or(true)
+    }
+
     /// Inserts a record at a specified key in the leaf node.
     /// Replaces the last record in the leaf node if no space is available (this should not happen because you
     /// should already be rebalancing before running this).
@@ -200,7 +228,7 @@ fn follow_node(
     handle: Arc<Mutex<File>>,
     pos: u64,
     key: u64,
-) -> BoxFuture<'static, Result<RecordId, Error>> {
+) -> BoxFuture<'static, Result<LeafNode, Error>> {
     Box::pin(async move {
         let node_buff = {
             let mut handle = handle.lock().await;
@@ -226,7 +254,7 @@ fn follow_node(
                     .map_err(|e| Error::IoError(e))?;
 
                 // Get the record pointer
-                return node_buff.get(key);
+                return Ok(node_buff);
             }
 
             // Get the internal node, and get the next position to go to
@@ -268,7 +296,7 @@ impl Handler<GetKey> for IndexHandle {
     fn handle(&mut self, msg: GetKey, _ctx: &mut Context<Self>) -> Self::Result {
         let handle = self.handle.clone();
 
-        Box::pin(async move { follow_node(handle, 0, msg.0).await })
+        Box::pin(async move { Ok(follow_node(handle, 0, msg.0).await?.get(msg.0)?) })
     }
 }
 
@@ -277,26 +305,34 @@ impl Handler<InsertKey> for IndexHandle {
 
     fn handle(&mut self, msg: InsertKey, _ctx: &mut Context<Self>) -> Self::Result {
         Box::pin(async move {
-            let f = self.handle.lock().await;
+            {
+                let f = self.handle.lock().await;
 
-            // If the file length is zero, this is the root node. Insert it
-            if fs::file_is_empty(&f).await {
-                let mut root_node = InternalNode::default();
-                root_node.insert(msg.0, INTERNAL_NODE_SIZE as u64);
+                // If the file length is zero, this is the root node. Insert it
+                if fs::file_is_empty(&f).await {
+                    let mut root_node = InternalNode::default();
+                    root_node.insert(msg.0, INTERNAL_NODE_SIZE as u64);
 
-                let mut leaf_node = LeafNode::default();
-                leaf_node.insert(msg.0, msg.1);
+                    let mut leaf_node = LeafNode::default();
+                    leaf_node.insert(msg.0, msg.1);
 
-                // Write the two blocks to the file
-                f.write_all(root_node.0.as_slice())
-                    .await
-                    .map_err(|e| Error::IoError(e))?;
-                f.write_all(leaf_node.0.as_slice())
-                    .await
-                    .map_err(|e| Error::IoError(e))?;
+                    // Write the two blocks to the file
+                    f.write_all(root_node.0.as_slice())
+                        .await
+                        .map_err(|e| Error::IoError(e))?;
+                    f.write_all(leaf_node.0.as_slice())
+                        .await
+                        .map_err(|e| Error::IoError(e))?;
+                }
             }
 
-            // TODO: Implement insertion for non-root node
+            // Find the parent node that this belongs under that has space and insert
+            let mut candidate_leaf_node = follow_node(self.handle, 0, msg.0).await?;
+            if !candidate_leaf_node.is_full() {
+                candidate_leaf_node.insert(msg.0, msg.1)?;
+            }
+
+            // Need to split the parent node
             todo!()
         })
     }
