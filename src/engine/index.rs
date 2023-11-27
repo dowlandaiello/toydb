@@ -1,13 +1,14 @@
 use super::super::{
     error::Error,
     types::db::{RecordId, RECORD_ID_SIZE},
+    util::fs,
 };
 use actix::{Actor, Context, Handler, Message, ResponseFuture};
 use futures::future::BoxFuture;
 use std::{io::SeekFrom, mem, sync::Arc};
 use tokio::{
     fs::File,
-    io::{AsyncReadExt, AsyncSeekExt},
+    io::{AsyncReadExt, AsyncSeekExt, AsyncWriteExt},
     sync::Mutex,
 };
 
@@ -27,6 +28,10 @@ pub const INTERNAL_NODE_SIZE: usize =
 pub const LEAF_NODE_SIZE: usize =
     // Size of leaf flag:
     mem::size_of::<bool>() +
+	// Size of pointer to previous node
+	mem::size_of::<u64>() +
+	// Size of pointer to next node
+	mem::size_of::<u64>() +
 	// Size of keys:
 	ORDER * mem::size_of::<u64>() +
 		// Size of record pointers
@@ -35,16 +40,55 @@ pub const LEAF_NODE_SIZE: usize =
 /// A wrapp for a disk segment containing data in the format of an internal node.
 pub struct InternalNode([u8; INTERNAL_NODE_SIZE]);
 
+impl Default for InternalNode {
+    fn default() -> Self {
+        Self([0; INTERNAL_NODE_SIZE])
+    }
+}
+
 impl InternalNode {
-    fn is_leaf_node(&self) -> bool {
-        bool::from(self.0[0] != 0)
+    // Inserts a pointer in the internal node
+    fn insert(&mut self, k: u64, v: u64) -> Result<(), Error> {
+        let mut rem = &self.0[1 + mem::size_of::<u64>()..];
+        let mut insert_idx = 0;
+
+        // Find a free spot in the list of nodes
+        for i in 0..ORDER {
+            let key_bytes: [u8; mem::size_of::<u64>()] = (&rem[0..mem::size_of::<u64>()])
+                .try_into()
+                .map_err(|_| Error::ConversionError)?;
+
+            if key_bytes.iter().all(|x| x == &0) {
+                insert_idx = i;
+                break;
+            }
+
+            rem = &rem[mem::size_of::<u64>() * 2..];
+        }
+
+        // Insert the pointer followed by the key (left biased)
+        let rem = &mut self.0[1..];
+        let abs_idx = insert_idx * (mem::size_of::<u64>() * 2);
+
+        let key_bytes: [u8; mem::size_of::<u64>()] = k.to_le_bytes();
+        let ptr_bytes: [u8; mem::size_of::<u64>()] = v.to_le_bytes();
+
+        for i in 0..ptr_bytes.len() {
+            rem[i + abs_idx] = ptr_bytes[i];
+        }
+
+        for i in 0..key_bytes.len() {
+            rem[i + abs_idx + ptr_bytes.len()] = key_bytes[i];
+        }
+
+        Ok(())
     }
 
     // Fetches the file pointer at a specified key in the internal node
     fn get(&self, key: u64) -> Result<u64, Error> {
-        let mut rem = &self.0[1 + mem::size_of::<u64>()..];
+        let mut rem = &self.0[1..];
 
-        for i in 0..ORDER {
+        for _ in 0..ORDER {
             let ptr_bytes: [u8; mem::size_of::<u64>()] = (&rem[0..mem::size_of::<u64>()])
                 .try_into()
                 .map_err(|_| Error::ConversionError)?;
@@ -56,9 +100,11 @@ impl InternalNode {
             let curr_key: u64 = u64::from_le_bytes(key_bytes);
             let ptr: u64 = u64::from_le_bytes(ptr_bytes);
 
-            if curr_key > key {
+            if curr_key >= key && ptr != 0 {
                 return Ok(ptr);
             }
+
+            rem = &rem[mem::size_of::<u64>() * 2..];
         }
 
         Err(Error::RecordNotFound)
@@ -68,16 +114,64 @@ impl InternalNode {
 /// A wrapper for a disk segment containing data in the format of a leaf node.
 pub struct LeafNode([u8; LEAF_NODE_SIZE]);
 
+impl Default for LeafNode {
+    fn default() -> Self {
+        let mut buff = [0; LEAF_NODE_SIZE];
+        buff[0] = 1;
+
+        LeafNode(buff)
+    }
+}
+
 impl LeafNode {
-    fn is_leaf_node(&self) -> bool {
-        bool::from(self.0[0] != 0)
+    /// Inserts a record at a specified key in the leaf node.
+    /// Replaces the last record in the leaf node if no space is available (this should not happen because you
+    /// should already be rebalancing before running this).
+    fn insert(&self, key: u64, val: RecordId) -> Result<(), Error> {
+        let mut rem = &self.0[1 + (2 * mem::size_of::<u64>())..];
+        let mut insert_idx = 0;
+
+        for i in 0..ORDER {
+            // Look for a key-value pair that is zero that is not in the zeroth position
+            let key_bytes: [u8; mem::size_of::<u64>()] = (&rem[0..mem::size_of::<u64>()])
+                .try_into()
+                .map_err(|_| Error::ConversionError)?;
+            let val_bytes: [u8; RECORD_ID_SIZE] = (&rem
+                [mem::size_of::<u64>()..(mem::size_of::<u64>() + RECORD_ID_SIZE)])
+                .try_into()
+                .map_err(|_| Error::ConversionError)?;
+
+            // The position is empty
+            if key_bytes.iter().all(|x| x == &0) && val_bytes.iter().all(|x| x == &0) {
+                insert_idx = i;
+            }
+
+            rem = &rem[mem::size_of::<u64>() + RECORD_ID_SIZE..];
+        }
+
+        // Insert the key followed by the value
+        let rem = &mut self.0[1 + (2 * mem::size_of::<u64>())..];
+        let abs_idx = insert_idx * (mem::size_of::<u64>() + RECORD_ID_SIZE);
+
+        let key_bytes: [u8; mem::size_of::<u64>()] = k.to_le_bytes();
+        let record_bytes: [u8; RECORD_ID_SIZE] = val.into();
+
+        for i in 0..key_bytes.len() {
+            rem[i + abs_idx] = key_bytes[i];
+        }
+
+        for i in 0..record_bytes.len() {
+            rem[i + abs_idx + key_bytes.len()] = record_bytes[i];
+        }
+
+        Err(Error::RecordNotFound)
     }
 
     // Fetches the record at a specified key in the leaf node.
     fn get(&self, key: u64) -> Result<RecordId, Error> {
-        let mut rem = &self.0[1..];
+        let mut rem = &self.0[1 + (2 * mem::size_of::<u64>())..];
 
-        for i in 0..ORDER {
+        for _ in 0..ORDER {
             let key_bytes: [u8; mem::size_of::<u64>()] = (&rem[0..mem::size_of::<u64>()])
                 .try_into()
                 .map_err(|_| Error::ConversionError)?;
@@ -99,16 +193,6 @@ impl LeafNode {
 
         Err(Error::RecordNotFound)
     }
-}
-
-/// Gets a record pointer from a key.
-#[derive(Message)]
-#[rtype(result = "Result<RecordId, Error>")]
-pub struct GetKey(u64);
-
-/// An abstraction representing a handle to a B+ tree index file for a database.
-pub struct IndexHandle {
-    handle: Arc<Mutex<File>>,
 }
 
 // Traverse nodes until a key is found.
@@ -159,6 +243,21 @@ fn follow_node(
     })
 }
 
+/// Gets a record pointer from a key.
+#[derive(Message)]
+#[rtype(result = "Result<RecordId, Error>")]
+pub struct GetKey(u64);
+
+/// Inserts a record pointer at a key.
+#[derive(Message)]
+#[rtype(result = "Result<(), Error>")]
+pub struct InsertKey(u64, RecordId);
+
+/// An abstraction representing a handle to a B+ tree index file for a database.
+pub struct IndexHandle {
+    handle: Arc<Mutex<File>>,
+}
+
 impl Actor for IndexHandle {
     type Context = Context<Self>;
 }
@@ -170,5 +269,35 @@ impl Handler<GetKey> for IndexHandle {
         let handle = self.handle.clone();
 
         Box::pin(async move { follow_node(handle, 0, msg.0).await })
+    }
+}
+
+impl Handler<InsertKey> for IndexHandle {
+    type Result = ResponseFuture<Result<(), Error>>;
+
+    fn handle(&mut self, msg: InsertKey, _ctx: &mut Context<Self>) -> Self::Result {
+        Box::pin(async move {
+            let f = self.handle.lock().await;
+
+            // If the file length is zero, this is the root node. Insert it
+            if fs::file_is_empty(&f).await {
+                let mut root_node = InternalNode::default();
+                root_node.insert(msg.0, INTERNAL_NODE_SIZE as u64);
+
+                let mut leaf_node = LeafNode::default();
+                leaf_node.insert(msg.0, msg.1);
+
+                // Write the two blocks to the file
+                f.write_all(root_node.0.as_slice())
+                    .await
+                    .map_err(|e| Error::IoError(e))?;
+                f.write_all(leaf_node.0.as_slice())
+                    .await
+                    .map_err(|e| Error::IoError(e))?;
+            }
+
+            // TODO: Implement insertion for non-root node
+            todo!()
+        })
     }
 }
