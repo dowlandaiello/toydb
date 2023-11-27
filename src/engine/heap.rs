@@ -1,6 +1,6 @@
 use super::{
     super::{error::Error, types::db::RecordId},
-    buffer_pool::{DbHandle, LoadHead, NewPage, WritePage, PAGE_SIZE},
+    buffer_pool::{DbHandle, LoadHead, LoadPage, NewPage, WritePage, PAGE_SIZE},
 };
 use actix::{Actor, Addr, Context, Handler, Message, ResponseFuture};
 use std::future;
@@ -9,6 +9,11 @@ use std::future;
 #[derive(Message)]
 #[rtype(result = "Result<RecordId, Error>")]
 pub struct InsertRecord(Vec<u8>);
+
+/// Loads a record from the heap file.
+#[derive(Message)]
+#[rtype(result = "Result<Vec<u8>, Error>")]
+pub struct LoadRecord(RecordId);
 
 /// An open heap abstraction.
 /// Allows:
@@ -67,6 +72,28 @@ impl Handler<InsertRecord> for HeapHandle {
                 page: page_index,
                 page_idx: idx,
             })
+        })
+    }
+}
+
+impl Handler<LoadRecord> for HeapHandle {
+    type Result = ResponseFuture<Result<Vec<u8>, Error>>;
+
+    fn handle(&mut self, msg: LoadRecord, _ctx: &mut Context<Self>) -> Self::Result {
+        let RecordId { page, page_idx } = msg.0;
+        let buff = self.buffer.clone();
+
+        Box::pin(async move {
+            // Read the page that the record is in
+            let page = buff
+                .send(LoadPage(page))
+                .await
+                .map_err(|e| Error::MailboxError(e))??;
+
+            // Load the record from the page
+            let val = page.get(page_idx).ok_or(Error::RecordNotFound)?;
+
+            Ok(val)
         })
     }
 }

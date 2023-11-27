@@ -11,6 +11,7 @@ pub enum Error {
     PageOutOfBounds,
     MutexError,
     ConversionError,
+    RecordNotFound,
 }
 
 impl fmt::Display for Error {
@@ -26,6 +27,7 @@ impl fmt::Display for Error {
             Self::PageOutOfBounds => write!(f, "the record is larger than a page"),
             Self::MutexError => write!(f, "encountered a mutex error"),
             Self::ConversionError => write!(f, "encountered a type conversion error"),
+            Self::RecordNotFound => write!(f, "the record was not found in the page"),
         }
     }
 }
@@ -36,8 +38,10 @@ impl StdError for Error {
             Self::XdgError(e) => Some(e),
             Self::IoError(e) => Some(e),
             Self::MailboxError(e) => Some(e),
-            Self::PageOutOfBounds | Self::MutexError => None,
-            Self::ConversionError => None,
+            Self::PageOutOfBounds
+            | Self::MutexError
+            | Self::ConversionError
+            | Self::RecordNotFound => None,
         }
     }
 }
