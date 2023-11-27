@@ -11,11 +11,12 @@ use futures::future::TryFutureExt;
 use std::{
     collections::HashMap,
     future, mem,
-    sync::{Arc, Mutex},
+    sync::{Arc, Mutex as SyncMutex},
 };
 use tokio::{
     fs::{File, OpenOptions},
     io::{AsyncReadExt, AsyncSeekExt, AsyncWriteExt, SeekFrom},
+    sync::Mutex,
 };
 
 /// The size of pages loaded from heap files in bytes.
@@ -23,17 +24,17 @@ pub const PAGE_SIZE: usize = 8_000;
 
 /// A fixed-size page of 8kB.
 #[derive(Clone)]
-pub struct Page(Arc<Mutex<[u8; PAGE_SIZE]>>);
+pub struct Page(Arc<SyncMutex<[u8; PAGE_SIZE]>>);
 
 impl Default for Page {
     fn default() -> Self {
-        Self(Arc::new(Mutex::new([0; PAGE_SIZE])))
+        Self(Arc::new(SyncMutex::new([0; PAGE_SIZE])))
     }
 }
 
 impl Page {
     pub fn new(contents: [u8; PAGE_SIZE]) -> Self {
-        Self(Arc::new(Mutex::new(contents)))
+        Self(Arc::new(SyncMutex::new(contents)))
     }
 
     /// Calculates the number of bytes used in the page.
@@ -208,7 +209,7 @@ impl Handler<LoadPage> for DbHandle {
 
         // Seek to the position in the file that the page is located at
         let read_fut = async move {
-            let mut handle = handle_lock.lock().map_err(|_| Error::MutexError)?;
+            let mut handle = handle_lock.lock().await;
 
             handle
                 .seek(SeekFrom::Start((msg.0 as usize * PAGE_SIZE) as u64))
@@ -291,7 +292,7 @@ impl Handler<WritePage> for DbHandle {
 
         // Commit the page to disk
         let write_fut = async move {
-            let mut handle = handle_lock.lock().map_err(|_| Error::MutexError)?;
+            let mut handle = handle_lock.lock().await;
             handle
                 .seek(SeekFrom::Start((msg.0 as usize * PAGE_SIZE) as u64))
                 .await

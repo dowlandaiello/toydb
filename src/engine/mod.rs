@@ -1,12 +1,13 @@
 use super::error::Error;
 use actix::{Actor, Addr, Context, Handler, ResponseFuture};
 use buffer_pool::{BufferPool, DbHandle, GetBuffer};
-use cmd::ddl::CreateDatabase;
+use cmd::ddl::{CreateDatabase, CreateTable};
 use std::default::Default;
 
 pub mod buffer_pool;
 pub mod cmd;
 pub mod heap;
+pub mod index;
 
 /// The command processor for ToyDB.
 pub struct Engine {

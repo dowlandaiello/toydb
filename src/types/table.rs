@@ -14,11 +14,11 @@ pub enum Ty {
 pub struct Item(Ty, Vec<u8>);
 
 impl From<Item> for Vec<u8> {
-    fn from(item: Item) -> Vec<u8> {
+    fn from(mut item: Item) -> Vec<u8> {
         let size = item.1.len();
         let mut buff = Vec::with_capacity(size + mem::size_of::<usize>());
-        let size_bytes: usize = size.to_le_bytes();
-        buff.append(size_bytes);
+        let mut size_bytes: Vec<u8> = size.to_le_bytes().to_vec();
+        buff.append(&mut size_bytes);
         buff.append(&mut item.1);
 
         buff

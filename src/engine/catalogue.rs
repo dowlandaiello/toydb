@@ -1,2 +1,2 @@
-/// A record of all
+/// A relation containing for each table:
 pub struct Catalogue {}
