@@ -7,6 +7,7 @@ pub type DbName = String;
 pub type PageId = usize;
 
 /// A unique identifier in a heap file identifying a record.
+#[derive(Clone)]
 pub struct RecordId {
     pub(crate) page: PageId,
     pub(crate) page_idx: usize,

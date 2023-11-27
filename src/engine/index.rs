@@ -37,6 +37,18 @@ pub const LEAF_NODE_SIZE: usize =
 		// Size of record pointers
 		ORDER * RECORD_ID_SIZE;
 
+/// Specifies whether the user is looking for a leaf node to insert into or a suitable parent node to insert a leaf node as a child of.
+#[derive(PartialEq)]
+pub enum SearchTarget {
+    LeafNode,
+    InternalNode,
+}
+
+pub enum SearchResult {
+    LeafNode(LeafNode),
+    InternalNode(InternalNode),
+}
+
 /// A wrapp for a disk segment containing data in the format of an internal node.
 pub struct InternalNode([u8; INTERNAL_NODE_SIZE]);
 
@@ -155,7 +167,7 @@ impl LeafNode {
     /// Inserts a record at a specified key in the leaf node.
     /// Replaces the last record in the leaf node if no space is available (this should not happen because you
     /// should already be rebalancing before running this).
-    fn insert(&self, key: u64, val: RecordId) -> Result<(), Error> {
+    fn insert(&mut self, key: u64, val: RecordId) -> Result<(), Error> {
         let mut rem = &self.0[1 + (2 * mem::size_of::<u64>())..];
         let mut insert_idx = 0;
 
@@ -181,7 +193,7 @@ impl LeafNode {
         let rem = &mut self.0[1 + (2 * mem::size_of::<u64>())..];
         let abs_idx = insert_idx * (mem::size_of::<u64>() + RECORD_ID_SIZE);
 
-        let key_bytes: [u8; mem::size_of::<u64>()] = k.to_le_bytes();
+        let key_bytes: [u8; mem::size_of::<u64>()] = key.to_le_bytes();
         let record_bytes: [u8; RECORD_ID_SIZE] = val.into();
 
         for i in 0..key_bytes.len() {
@@ -228,7 +240,8 @@ fn follow_node(
     handle: Arc<Mutex<File>>,
     pos: u64,
     key: u64,
-) -> BoxFuture<'static, Result<LeafNode, Error>> {
+    target: SearchTarget,
+) -> BoxFuture<'static, Result<(SearchResult, u64), Error>> {
     Box::pin(async move {
         let node_buff = {
             let mut handle = handle.lock().await;
@@ -245,16 +258,15 @@ fn follow_node(
                 .await
                 .map_err(|e| Error::IoError(e))?;
 
-            // If the current node is a leaf, load the node and return the record pointer
-            if is_leaf_flag_buff[0] != 0 {
+            // If the current node is a leaf AND we are looking for a leaf load the node and return the record pointer
+            if is_leaf_flag_buff[0] != 0 && target == SearchTarget::LeafNode {
                 let mut node_buff: LeafNode = LeafNode([0; LEAF_NODE_SIZE]);
                 handle
                     .read_exact(&mut node_buff.0)
                     .await
                     .map_err(|e| Error::IoError(e))?;
 
-                // Get the record pointer
-                return Ok(node_buff);
+                return Ok((SearchResult::LeafNode(node_buff), pos));
             }
 
             // Get the internal node, and get the next position to go to
@@ -267,7 +279,12 @@ fn follow_node(
             node_buff
         };
 
-        follow_node(handle, node_buff.get(key)?, key).await
+        if target == SearchTarget::LeafNode {
+            follow_node(handle, node_buff.get(key)?, key, target).await
+        } else {
+            let res = follow_node(handle, node_buff.get(key)?, key, target).await;
+            Ok(res.unwrap_or((SearchResult::InternalNode(node_buff), pos)))
+        }
     })
 }
 
@@ -296,7 +313,17 @@ impl Handler<GetKey> for IndexHandle {
     fn handle(&mut self, msg: GetKey, _ctx: &mut Context<Self>) -> Self::Result {
         let handle = self.handle.clone();
 
-        Box::pin(async move { Ok(follow_node(handle, 0, msg.0).await?.get(msg.0)?) })
+        Box::pin(async move {
+            let res = follow_node(handle, 0, msg.0, SearchTarget::LeafNode)
+                .await?
+                .0;
+
+            if let SearchResult::LeafNode(n) = res {
+                Ok(n.get(msg.0)?)
+            } else {
+                Err(Error::RecordNotFound)
+            }
+        })
     }
 }
 
@@ -304,17 +331,19 @@ impl Handler<InsertKey> for IndexHandle {
     type Result = ResponseFuture<Result<(), Error>>;
 
     fn handle(&mut self, msg: InsertKey, _ctx: &mut Context<Self>) -> Self::Result {
+        let handle = self.handle.clone();
+
         Box::pin(async move {
             {
-                let f = self.handle.lock().await;
+                let mut f = handle.lock().await;
 
                 // If the file length is zero, this is the root node. Insert it
                 if fs::file_is_empty(&f).await {
                     let mut root_node = InternalNode::default();
-                    root_node.insert(msg.0, INTERNAL_NODE_SIZE as u64);
+                    root_node.insert(msg.0, INTERNAL_NODE_SIZE as u64)?;
 
                     let mut leaf_node = LeafNode::default();
-                    leaf_node.insert(msg.0, msg.1);
+                    leaf_node.insert(msg.0, msg.1.clone())?;
 
                     // Write the two blocks to the file
                     f.write_all(root_node.0.as_slice())
@@ -323,14 +352,34 @@ impl Handler<InsertKey> for IndexHandle {
                     f.write_all(leaf_node.0.as_slice())
                         .await
                         .map_err(|e| Error::IoError(e))?;
+
+                    return Ok(());
                 }
             }
 
-            // Find the parent node that this belongs under that has space and insert
-            let mut candidate_leaf_node = follow_node(self.handle, 0, msg.0).await?;
-            if !candidate_leaf_node.is_full() {
-                candidate_leaf_node.insert(msg.0, msg.1)?;
+            // Find the leaf node that this belongs in that has space and insert
+            let (candidate_leaf_node, pos) =
+                follow_node(handle.clone(), 0, msg.0, SearchTarget::LeafNode).await?;
+
+            if let SearchResult::LeafNode(mut n) = candidate_leaf_node {
+                if !n.is_full() {
+                    n.insert(msg.0, msg.1)?;
+
+                    // Write the candidate node
+                    let mut f = handle.lock().await;
+
+                    f.seek(SeekFrom::Start(pos))
+                        .await
+                        .map_err(|e| Error::IoError(e))?;
+                    f.write_all(n.0.as_slice())
+                        .await
+                        .map_err(|e| Error::IoError(e))?;
+
+                    return Ok(());
+                }
             }
+
+            // Find the parent internal node that has space for this and insert
 
             // Need to split the parent node
             todo!()
