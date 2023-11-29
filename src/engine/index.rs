@@ -60,7 +60,7 @@ impl Default for InternalNode {
 
 impl InternalNode {
     // Inserts a pointer in the internal node
-    fn insert(&mut self, k: u64, v: u64) -> Result<(), Error> {
+    fn insert(&mut self, k: Option<u64>, v: u64) -> Result<(), Error> {
         let mut rem = &self.0[1 + mem::size_of::<u64>()..];
         let mut insert_idx = 0;
 
@@ -82,15 +82,17 @@ impl InternalNode {
         let rem = &mut self.0[1..];
         let abs_idx = insert_idx * (mem::size_of::<u64>() * 2);
 
-        let key_bytes: [u8; mem::size_of::<u64>()] = k.to_le_bytes();
         let ptr_bytes: [u8; mem::size_of::<u64>()] = v.to_le_bytes();
 
         for i in 0..ptr_bytes.len() {
             rem[i + abs_idx] = ptr_bytes[i];
         }
 
-        for i in 0..key_bytes.len() {
-            rem[i + abs_idx + ptr_bytes.len()] = key_bytes[i];
+        if let Some(key) = k {
+            let key_bytes: [u8; mem::size_of::<u64>()] = k.to_le_bytes();
+            for i in 0..key_bytes.len() {
+                rem[i + abs_idx + ptr_bytes.len()] = key_bytes[i];
+            }
         }
 
         Ok(())
@@ -100,7 +102,7 @@ impl InternalNode {
     fn get(&self, key: u64) -> Result<u64, Error> {
         let mut rem = &self.0[1..];
 
-        for _ in 0..ORDER {
+        for i in 0..ORDER {
             let ptr_bytes: [u8; mem::size_of::<u64>()] = (&rem[0..mem::size_of::<u64>()])
                 .try_into()
                 .map_err(|_| Error::ConversionError)?;
@@ -112,8 +114,22 @@ impl InternalNode {
             let curr_key: u64 = u64::from_le_bytes(key_bytes);
             let ptr: u64 = u64::from_le_bytes(ptr_bytes);
 
-            if curr_key >= key && ptr != 0 {
+            if curr_key > key && ptr != 0 {
                 return Ok(ptr);
+            }
+
+            // The last key also has a pointer space to the right of it
+            if i == ORDER - 1 && curr_key < key {
+                let last_ptr_bytes: [u8; mem::size_of::<u64>()] = (&rem
+                    [(2 * mem::size_of::<u64>())..(3 * mem::size_of::<u64>())])
+                    .try_into()
+                    .map_err(|_| Error::ConversionError)?;
+                let last_ptr: u64 = u64::from_le_bytes(last_ptr_bytes);
+
+                // The space is occupied
+                if last_ptr != 0 {
+                    return Ok(last_ptr);
+                }
             }
 
             rem = &rem[mem::size_of::<u64>() * 2..];
@@ -136,6 +152,82 @@ impl Default for LeafNode {
 }
 
 impl LeafNode {
+    /// Determines the median key in the leaf node.
+    fn median(&self) -> Result<u64, Error> {
+        let mut rem = &self.0[1 + (2 * mem::size_of::<u64>())..];
+        let mut median_key = 0;
+
+        for _ in 0..(ORDER / 2) {
+            let key_bytes: [u8; mem::size_of::<u64>()] = (&rem[0..mem::size_of::<u64>()])
+                .try_into()
+                .map_err(|_| Error::ConversionError)?;
+
+            median_key = u64::from_le_bytes(key_bytes);
+            rem = &rem[mem::size_of::<u64>() + RECORD_ID_SIZE..];
+        }
+
+        Ok(median_key)
+    }
+
+    /// Retrieves a list of the values less than the median value in the node's keys.
+    fn left_values(&self) -> Result<Vec<(u64, RecordId)>, Error> {
+        let mut rem = &self.0[1 + (2 * mem::size_of::<u64>())..];
+        let mut vals = Vec::new();
+        let med = self.median()?;
+
+        for _ in 0..ORDER {
+            let key_bytes: [u8; mem::size_of::<u64>()] = (&rem[0..mem::size_of::<u64>()])
+                .try_into()
+                .map_err(|_| Error::ConversionError)?;
+            let val_bytes: [u8; RECORD_ID_SIZE] = (&rem
+                [mem::size_of::<u64>()..(mem::size_of::<u64>() + RECORD_ID_SIZE)])
+                .try_into()
+                .map_err(|_| Error::ConversionError)?;
+
+            let curr_key: u64 = u64::from_le_bytes(key_bytes);
+            let val: RecordId = RecordId::from(val_bytes);
+
+            if curr_key == med {
+                break;
+            }
+
+            // This value is less than the median
+            vals.push((curr_key, val));
+
+            rem = &rem[mem::size_of::<u64>() + RECORD_ID_SIZE..];
+        }
+
+        Ok(vals)
+    }
+
+    /// Retrieves a list of the values less than the median value in the node's keys.
+    fn right_values(&self) -> Result<Vec<(u64, RecordId)>, Error> {
+        let mut rem = &self.0[1 + (2 * mem::size_of::<u64>())..];
+        let mut vals = Vec::new();
+        let med = self.median()?;
+
+        // Seek to the part of children that begins with the key
+        for _ in 0..ORDER {
+            let key_bytes: [u8; mem::size_of::<u64>()] = (&rem[0..mem::size_of::<u64>()])
+                .try_into()
+                .map_err(|_| Error::ConversionError)?;
+            let curr_key: u64 = u64::from_le_bytes(key_bytes);
+            let val_bytes: [u8; RECORD_ID_SIZE] = (&rem
+                [mem::size_of::<u64>()..(mem::size_of::<u64>() + RECORD_ID_SIZE)])
+                .try_into()
+                .map_err(|_| Error::ConversionError)?;
+            let val: RecordId = RecordId::from(val_bytes);
+
+            if curr_key >= med {
+                vals.push((curr_key, val));
+            }
+
+            rem = &rem[mem::size_of::<u64>() + RECORD_ID_SIZE..];
+        }
+
+        Ok(vals)
+    }
+
     /// Returns whether or not there are any slots left in the leaf node
     fn is_full(&self) -> bool {
         fn is_full_helper(slf: &LeafNode) -> Option<bool> {
@@ -340,7 +432,7 @@ impl Handler<InsertKey> for IndexHandle {
                 // If the file length is zero, this is the root node. Insert it
                 if fs::file_is_empty(&f).await {
                     let mut root_node = InternalNode::default();
-                    root_node.insert(msg.0, INTERNAL_NODE_SIZE as u64)?;
+                    root_node.insert(Some(msg.0), INTERNAL_NODE_SIZE as u64)?;
 
                     let mut leaf_node = LeafNode::default();
                     leaf_node.insert(msg.0, msg.1.clone())?;
@@ -377,11 +469,61 @@ impl Handler<InsertKey> for IndexHandle {
 
                     return Ok(());
                 }
+
+                // The leaf node is full. Split it by creating an internal node
+                // with a value of the halfway point of the leaf node and inserting
+                // a leaf node with half of the values to the left of it
+                // and a leaf node with the other half of the values to the right of it
+                let left_vals = n.left_values()?;
+                let right_vals = n.right_values()?;
+                let median = n.median()?;
+
+                let mut new_parent = InternalNode::default();
+                let left = LeafNode::default();
+                let right = LeafNode::default();
+
+                // Copy all nodes less than median into left node
+                for (k, v) in left_vals {
+                    left.insert(k, v)?;
+                }
+
+                for (k, v) in right_vals {
+                    right.insert(k, v)?;
+                }
+
+                if msg.0 < median {
+                    left.insert(msg.0, msg.1)?;
+                } else {
+                    right.insert(msg.0, msg.1)?;
+                }
+
+                // Go to the end of the file to insert the new nodes
+                let mut f = handle.lock().await;
+                let new_nodes_pos = f
+                    .seek(SeekFrom::End(0))
+                    .await
+                    .map_err(|e| Error::IoError(e))?;
+                f.write_all(left.0.as_slice())
+                    .await
+                    .map_err(|e| Error::IoError(e))?;
+                f.write_all(right.0.as_slice())
+                    .await
+                    .map_err(|e| Error::IoError(e))?;
+
+                // Go back to the old node and overwrite it with the new nodes inserted
+                new_parent.insert(Some(median), new_nodes_pos)?;
+                new_parent.insert(None, (new_nodes_pos as usize + LEAF_NODE_SIZE) as u64)?;
+
+                f.seek(SeekFrom::Start(pos))
+                    .await
+                    .map_err(|e| Error::IoError(e))?;
+                f.write_all(new_parent.0.as_slice())
+                    .await
+                    .map_err(|e| Error::IoError(e))?;
+
+                return Ok(());
             }
 
-            // Find the parent internal node that has space for this and insert
-
-            // Need to split the parent node
             todo!()
         })
     }

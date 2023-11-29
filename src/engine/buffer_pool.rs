@@ -288,6 +288,7 @@ impl Handler<WritePage> for DbHandle {
         // Write the page to memory
         self.pages[msg.0] = Some(msg.1.clone());
 
+        // TODO: Make this happen in an interval not readily commit
         let handle_lock = self.handle.clone();
 
         // Commit the page to disk
