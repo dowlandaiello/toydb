@@ -1,5 +1,6 @@
 use super::super::{
     error::Error,
+    items::Page,
     types::db::{DbName, PageId},
     util::fs,
 };
@@ -8,11 +9,8 @@ use actix::{
     ResponseActFuture, ResponseFuture, WrapFuture,
 };
 use futures::future::TryFutureExt;
-use std::{
-    collections::HashMap,
-    future, mem,
-    sync::{Arc, Mutex as SyncMutex},
-};
+use prost::Message as ProstMessage;
+use std::{collections::HashMap, future, sync::Arc};
 use tokio::{
     fs::{File, OpenOptions},
     io::{AsyncReadExt, AsyncSeekExt, AsyncWriteExt, SeekFrom},
@@ -21,88 +19,6 @@ use tokio::{
 
 /// The size of pages loaded from heap files in bytes.
 pub const PAGE_SIZE: usize = 8_000;
-
-/// A fixed-size page of 8kB.
-#[derive(Clone)]
-pub struct Page(Arc<SyncMutex<[u8; PAGE_SIZE]>>);
-
-impl Default for Page {
-    fn default() -> Self {
-        Self(Arc::new(SyncMutex::new([0; PAGE_SIZE])))
-    }
-}
-
-impl Page {
-    pub fn new(contents: [u8; PAGE_SIZE]) -> Self {
-        Self(Arc::new(SyncMutex::new(contents)))
-    }
-
-    /// Calculates the number of bytes used in the page.
-    pub fn space_used(&self) -> Result<usize, Error> {
-        let lock = self.0.lock().map_err(|_| Error::MutexError)?;
-
-        let bytes: [u8; mem::size_of::<usize>()] = (&lock[PAGE_SIZE - mem::size_of::<usize>()..])
-            .try_into()
-            .map_err(|_| Error::ConversionError)?;
-
-        Ok(usize::from_le_bytes(bytes))
-    }
-
-    // Determines the absolute index in the page's bytes corresponding to an index of records
-    fn follow_to_index(&self, raw_pos: usize, curr: usize, index: usize) -> Option<(usize, usize)> {
-        let record_size_bytes: [u8; mem::size_of::<usize>()] = {
-            let lock = self.0.lock().ok()?;
-            (&lock[raw_pos..raw_pos + mem::size_of::<usize>()])
-                .try_into()
-                .ok()?
-        };
-        let record_size = usize::from_le_bytes(record_size_bytes);
-
-        if curr == index {
-            Some((raw_pos, record_size))
-        } else {
-            self.follow_to_index(raw_pos + record_size, curr + 1, index)
-        }
-    }
-
-    /// Gets the contents of the ith record
-    pub fn get(&self, i: usize) -> Option<Vec<u8>> {
-        let (pos, size) = self.follow_to_index(0, 0, i)?;
-        Some({
-            let lock = self.0.lock().ok()?;
-            (&lock[pos..pos + size]).to_owned()
-        })
-    }
-
-    /// Appends the record to the page, returning the index of the value in the page.
-    pub fn append(&self, val: &[u8]) -> Result<usize, Error> {
-        let mut lock = self.0.lock().map_err(|_| Error::MutexError)?;
-        let space_used = self.space_used()?;
-
-        let size: usize = mem::size_of::<usize>() + val.len() + space_used;
-        let size_bytes: [u8; mem::size_of::<usize>()] = size.to_le_bytes();
-
-        // Update the space used header
-        for i in 0..size_bytes.len() {
-            lock[i] = size_bytes[i];
-        }
-
-        // Add the value's size header
-        let size_local: usize = mem::size_of::<usize>() + val.len();
-        let size_bytes: [u8; mem::size_of::<usize>()] = size_local.to_le_bytes();
-
-        for i in 0..(mem::size_of::<usize>()) {
-            lock[space_used + i] = size_bytes[i];
-        }
-
-        // Add the value
-        for i in 0..val.len() {
-            lock[space_used + mem::size_of::<usize>() + i] = val[i];
-        }
-
-        Ok(space_used)
-    }
-}
 
 /// A request to open or fetch an existing buffer for a database.
 #[derive(Message)]
@@ -223,7 +139,10 @@ impl Handler<LoadPage> for DbHandle {
                 .await
                 .map_err(|e| Error::IoError(e))?;
 
-            Ok(Page::new(buff))
+            // Decode the page (size delimited)
+            let page = Page::decode_length_delimited(buff.as_slice())
+                .map_err(|e| Error::DecodeError(e))?;
+            Ok(page)
         }
         .into_actor(self)
         .map_ok(move |page, slf, _ctx| {
@@ -299,11 +218,11 @@ impl Handler<WritePage> for DbHandle {
                 .await
                 .map_err(|e| Error::IoError(e))?;
 
-            let page_lock = msg.1 .0.lock().map_err(|_| Error::MutexError)?;
+            let encoded = msg.1.encode_length_delimited_to_vec();
 
             // Write the page
             handle
-                .write_all(page_lock.as_slice())
+                .write_all(encoded.as_slice())
                 .await
                 .map_err(|e| Error::IoError(e))?;
 

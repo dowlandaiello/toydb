@@ -1,0 +1,30 @@
+syntax = "proto3";
+
+package toydb.items;
+
+message RecordId {
+	uint64 page = 1;
+	uint64 page_idx = 2;
+}
+
+message BtreeInternalNode {
+	bool is_leaf_node = 1;
+	repeated uint64 keys = 2 [packed = true];
+	repeated uint64 child_pointers = 3 [packed = true];
+}
+
+message BtreeLeafNode {
+	bool is_leaf_node = 1;
+	repeated uint64 keys = 2 [packed = true];
+	repeated RecordId disk_pointers = 3;
+}
+
+message Record {
+	uint64 size = 1;
+	bytes data = 2;
+}
+
+message Page {
+	uint64 space_used = 1;
+	repeated Record data = 2;
+}

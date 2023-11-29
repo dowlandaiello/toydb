@@ -1,2 +1,2 @@
-/// A relation containing for each table:
+/// An abstraction
 pub struct Catalogue {}

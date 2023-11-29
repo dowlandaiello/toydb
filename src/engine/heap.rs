@@ -1,5 +1,8 @@
 use super::{
-    super::{error::Error, types::db::RecordId},
+    super::{
+        error::Error,
+        items::{Record, RecordId},
+    },
     buffer_pool::{DbHandle, LoadHead, LoadPage, NewPage, WritePage, PAGE_SIZE},
 };
 use actix::{Actor, Addr, Context, Handler, Message, ResponseFuture};
@@ -8,11 +11,11 @@ use std::future;
 /// Inserts a record at the end of the heap file.
 #[derive(Message)]
 #[rtype(result = "Result<RecordId, Error>")]
-pub struct InsertRecord(Vec<u8>);
+pub struct InsertRecord(Record);
 
 /// Loads a record from the heap file.
 #[derive(Message)]
-#[rtype(result = "Result<Vec<u8>, Error>")]
+#[rtype(result = "Result<Record, Error>")]
 pub struct LoadRecord(RecordId);
 
 /// An open heap abstraction.
@@ -33,7 +36,7 @@ impl Handler<InsertRecord> for HeapHandle {
 
     fn handle(&mut self, msg: InsertRecord, _ctx: &mut Context<Self>) -> Self::Result {
         // The record must not be larger than the size of a page
-        if msg.0.len() > PAGE_SIZE {
+        if msg.0.data.len() > PAGE_SIZE {
             return Box::pin(future::ready(Err(Error::PageOutOfBounds)));
         }
 
@@ -55,7 +58,7 @@ impl Handler<InsertRecord> for HeapHandle {
             };
 
             // Check if there is space in the page. If not, allocate a new buffer
-            if msg.0.len() > PAGE_SIZE - page.space_used().unwrap_or_default() {
+            if msg.0.data.len() > PAGE_SIZE - page.space_used as usize {
                 (page, page_index) = buff
                     .send(NewPage)
                     .await
@@ -63,21 +66,22 @@ impl Handler<InsertRecord> for HeapHandle {
             }
 
             // Insert the record
-            let idx = page.append(msg.0.as_slice())?;
+            let idx = page.data.len();
+            page.data.push(msg.0);
             buff.send(WritePage(page_index, page))
                 .await
                 .map_err(|e| Error::MailboxError(e))??;
 
             Ok(RecordId {
-                page: page_index,
-                page_idx: idx,
+                page: page_index as u64,
+                page_idx: idx as u64,
             })
         })
     }
 }
 
 impl Handler<LoadRecord> for HeapHandle {
-    type Result = ResponseFuture<Result<Vec<u8>, Error>>;
+    type Result = ResponseFuture<Result<Record, Error>>;
 
     fn handle(&mut self, msg: LoadRecord, _ctx: &mut Context<Self>) -> Self::Result {
         let RecordId { page, page_idx } = msg.0;
@@ -86,12 +90,16 @@ impl Handler<LoadRecord> for HeapHandle {
         Box::pin(async move {
             // Read the page that the record is in
             let page = buff
-                .send(LoadPage(page))
+                .send(LoadPage(page as usize))
                 .await
                 .map_err(|e| Error::MailboxError(e))??;
 
             // Load the record from the page
-            let val = page.get(page_idx).ok_or(Error::RecordNotFound)?;
+            let val = page
+                .data
+                .get(page_idx as usize)
+                .ok_or(Error::RecordNotFound)
+                .cloned()?;
 
             Ok(val)
         })

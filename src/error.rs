@@ -1,4 +1,5 @@
 use actix::MailboxError;
+use prost::{DecodeError, EncodeError};
 use std::{error::Error as StdError, fmt};
 use tokio::io::Error as IoError;
 use xdg::BaseDirectoriesError;
@@ -13,6 +14,8 @@ pub enum Error {
     ConversionError,
     RecordNotFound,
     TraversalError,
+    DecodeError(DecodeError),
+    EncodeError(EncodeError),
 }
 
 impl fmt::Display for Error {
@@ -30,6 +33,8 @@ impl fmt::Display for Error {
             Self::ConversionError => write!(f, "encountered a type conversion error"),
             Self::RecordNotFound => write!(f, "the record was not found in the page"),
             Self::TraversalError => write!(f, "failed to correctly traverse a tree structure"),
+            Self::DecodeError(e) => write!(f, "failed to decode a message with protobuf: {:?}", e),
+            Self::EncodeError(e) => write!(f, "failed to encode a message with protobuf: {:?}", e),
         }
     }
 }
@@ -40,6 +45,8 @@ impl StdError for Error {
             Self::XdgError(e) => Some(e),
             Self::IoError(e) => Some(e),
             Self::MailboxError(e) => Some(e),
+            Self::DecodeError(e) => Some(e),
+            Self::EncodeError(e) => Some(e),
             Self::PageOutOfBounds
             | Self::MutexError
             | Self::ConversionError
