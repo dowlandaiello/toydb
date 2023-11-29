@@ -12,6 +12,7 @@ pub enum Error {
     MutexError,
     ConversionError,
     RecordNotFound,
+    TraversalError,
 }
 
 impl fmt::Display for Error {
@@ -28,6 +29,7 @@ impl fmt::Display for Error {
             Self::MutexError => write!(f, "encountered a mutex error"),
             Self::ConversionError => write!(f, "encountered a type conversion error"),
             Self::RecordNotFound => write!(f, "the record was not found in the page"),
+            Self::TraversalError => write!(f, "failed to correctly traverse a tree structure"),
         }
     }
 }
@@ -41,7 +43,8 @@ impl StdError for Error {
             Self::PageOutOfBounds
             | Self::MutexError
             | Self::ConversionError
-            | Self::RecordNotFound => None,
+            | Self::RecordNotFound
+            | Self::TraversalError => None,
         }
     }
 }
