@@ -339,7 +339,7 @@ impl Handler<InsertKey> for TreeHandle {
                     root_node.keys[1] = msg.0;
                     root_node.child_pointers[0] = (body_len + len_len) as u64;
 
-                    let mut leaf_node = BTreeLeafNode::default();
+                    let mut leaf_node = create_leaf_node();
                     insert_leaf(&mut leaf_node, msg.0, msg.1.into())?;
 
                     // Write the two blocks to the file
@@ -382,9 +382,9 @@ impl Handler<InsertKey> for TreeHandle {
                     let right_vals = right_values_leaf(&n);
                     let median = median(Node::LeafNode(&n));
 
-                    let mut new_parent = BTreeInternalNode::default();
-                    let mut left = BTreeLeafNode::default();
-                    let mut right = BTreeLeafNode::default();
+                    let mut new_parent = create_internal_node();
+                    let mut left = create_leaf_node();
+                    let mut right = create_leaf_node();
 
                     // Copy all nodes less than median into left node
                     for (k, v) in left_vals {
@@ -452,9 +452,9 @@ impl Handler<InsertKey> for TreeHandle {
                     let right_vals = right_values_internal(&n);
                     let median = median(Node::InternalNode(&n));
 
-                    let mut new_parent = BTreeInternalNode::default();
-                    let mut left = BTreeInternalNode::default();
-                    let mut right = BTreeInternalNode::default();
+                    let mut new_parent = create_internal_node();
+                    let mut left = create_internal_node();
+                    let mut right = create_internal_node();
 
                     // Copy all nodes less than median into left node
                     for (k, v) in left_vals {
