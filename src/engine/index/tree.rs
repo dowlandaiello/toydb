@@ -33,9 +33,9 @@ enum SearchResult {
     InternalNode(BTreeInternalNode),
 }
 
-enum Node {
-    InternalNode(BTreeInternalNode),
-    LeafNode(BTreeLeafNode),
+enum Node<'a> {
+    InternalNode(&'a BTreeInternalNode),
+    LeafNode(&'a BTreeLeafNode),
 }
 
 impl From<RecordId> for RecordIdPointer {
@@ -161,7 +161,7 @@ fn median(n: Node) -> u64 {
     keys[keys.len() / 2]
 }
 
-fn left_values_internal(node: BTreeInternalNode) -> Vec<(u64, u64)> {
+fn left_values_internal(node: &BTreeInternalNode) -> Vec<(u64, u64)> {
     let med = median(Node::InternalNode(node));
 
     node.keys
@@ -172,7 +172,7 @@ fn left_values_internal(node: BTreeInternalNode) -> Vec<(u64, u64)> {
         .collect::<Vec<(u64, u64)>>()
 }
 
-fn right_values_internal(node: BTreeInternalNode) -> Vec<(u64, u64)> {
+fn right_values_internal(node: &BTreeInternalNode) -> Vec<(u64, u64)> {
     let med = median(Node::InternalNode(node));
 
     node.keys
@@ -183,7 +183,7 @@ fn right_values_internal(node: BTreeInternalNode) -> Vec<(u64, u64)> {
         .collect::<Vec<(u64, u64)>>()
 }
 
-fn get_internal(node: BTreeInternalNode, k: u64) -> Option<u64> {
+fn get_internal(node: &BTreeInternalNode, k: u64) -> Option<u64> {
     node.keys
         .iter()
         .zip(node.child_pointers.iter())
@@ -193,7 +193,7 @@ fn get_internal(node: BTreeInternalNode, k: u64) -> Option<u64> {
 }
 
 /// Retrieves a list of the values less than the median value in the node's keys.
-fn left_values_leaf(node: BTreeLeafNode) -> Vec<(u64, RecordIdPointer)> {
+fn left_values_leaf(node: &BTreeLeafNode) -> Vec<(u64, RecordIdPointer)> {
     let med = median(Node::LeafNode(node));
 
     node.keys
@@ -205,7 +205,7 @@ fn left_values_leaf(node: BTreeLeafNode) -> Vec<(u64, RecordIdPointer)> {
 }
 
 /// Retrieves a list of the values greater than or equal to the median value in the node's keys.
-fn right_values_leaf(node: BTreeLeafNode) -> Vec<(u64, RecordIdPointer)> {
+fn right_values_leaf(node: &BTreeLeafNode) -> Vec<(u64, RecordIdPointer)> {
     let med = median(Node::LeafNode(node));
 
     node.keys
@@ -250,7 +250,7 @@ fn follow_node(
                 .map_err(|e| Error::DecodeError(e))?;
 
             // Make a buffer for the size of the node
-            let node_buff: Vec<u8> = vec![0; length_delim];
+            let mut node_buff: Vec<u8> = vec![0; length_delim];
 
             // Read into the buff
             handle
@@ -276,7 +276,7 @@ fn follow_node(
             node
         };
 
-        let next = if let Some(n) = get_internal(node, key) {
+        let next = if let Some(n) = get_internal(&node, key) {
             n
         } else if target == SearchTarget::LeafNode {
             return Ok((None, pos, handle));
@@ -340,7 +340,7 @@ impl Handler<InsertKey> for TreeHandle {
                     root_node.child_pointers[0] = (body_len + len_len) as u64;
 
                     let mut leaf_node = BTreeLeafNode::default();
-                    insert_leaf(&mut leaf_node, msg.0, msg.1.into());
+                    insert_leaf(&mut leaf_node, msg.0, msg.1.into())?;
 
                     // Write the two blocks to the file
                     f.write_all(root_node.encode_length_delimited_to_vec().as_slice())
@@ -362,7 +362,7 @@ impl Handler<InsertKey> for TreeHandle {
                 {
                     // Attempt an insert
 
-                    if let Ok(_) = insert_leaf(&mut n, msg.0, msg.1.into()) {
+                    if let Ok(_) = insert_leaf(&mut n, msg.0, msg.1.clone().into()) {
                         // Write the candidate node
                         f.seek(SeekFrom::Start(pos))
                             .await
@@ -378,9 +378,9 @@ impl Handler<InsertKey> for TreeHandle {
                     // with a value of the halfway point of the leaf node and inserting
                     // a leaf node with half of the values to the left of it
                     // and a leaf node with the other half of the values to the right of it
-                    let left_vals = left_values_leaf(n);
-                    let right_vals = right_values_leaf(n);
-                    let median = median(Node::LeafNode(n));
+                    let left_vals = left_values_leaf(&n);
+                    let right_vals = right_values_leaf(&n);
+                    let median = median(Node::LeafNode(&n));
 
                     let mut new_parent = BTreeInternalNode::default();
                     let mut left = BTreeLeafNode::default();
@@ -448,9 +448,9 @@ impl Handler<InsertKey> for TreeHandle {
                     }
 
                     // Split the internal node up and then re-run the insertion
-                    let left_vals = left_values_internal(n);
-                    let right_vals = right_values_internal(n);
-                    let median = median(Node::InternalNode(n));
+                    let left_vals = left_values_internal(&n);
+                    let right_vals = right_values_internal(&n);
+                    let median = median(Node::InternalNode(&n));
 
                     let mut new_parent = BTreeInternalNode::default();
                     let mut left = BTreeInternalNode::default();
@@ -458,11 +458,11 @@ impl Handler<InsertKey> for TreeHandle {
 
                     // Copy all nodes less than median into left node
                     for (k, v) in left_vals {
-                        insert_internal(&mut left, Some(k), v);
+                        insert_internal(&mut left, Some(k), v)?;
                     }
 
                     for (k, v) in right_vals {
-                        insert_internal(&mut right, Some(k), v);
+                        insert_internal(&mut right, Some(k), v)?;
                     }
 
                     // Go to the end of the file to insert the new nodes
