@@ -7,16 +7,22 @@ message RecordId {
 	uint64 page_idx = 2;
 }
 
-message BtreeInternalNode {
+message RecordIdPointer {
+	bool is_empty = 1;
+	uint64 page = 2;
+	uint64 page_idx = 3;
+}
+
+message BTreeInternalNode {
 	bool is_leaf_node = 1;
 	repeated uint64 keys = 2 [packed = true];
 	repeated uint64 child_pointers = 3 [packed = true];
 }
 
-message BtreeLeafNode {
+message BTreeLeafNode {
 	bool is_leaf_node = 1;
 	repeated uint64 keys = 2 [packed = true];
-	repeated RecordId disk_pointers = 3;
+	repeated RecordIdPointer disk_pointers = 3;
 }
 
 message Record {

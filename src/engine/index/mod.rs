@@ -1,7 +1,7 @@
 pub mod tree;
 
 use super::{
-    super::{error::Error, types::db::RecordId},
+    super::{error::Error, items::RecordId},
     buffer_pool::PAGE_SIZE,
 };
 use actix::{
