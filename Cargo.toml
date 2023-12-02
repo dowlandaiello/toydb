@@ -13,6 +13,7 @@ xdg = "2.5.2"
 futures = "0.3.29"
 prost = "0.12"
 bytes = "1.5.0"
+future-utils = "0.12.1"
 
 [build-dependencies]
 prost-build = "0.12.3"

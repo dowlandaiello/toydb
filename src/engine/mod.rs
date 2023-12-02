@@ -8,6 +8,7 @@ pub mod buffer_pool;
 pub mod cmd;
 pub mod heap;
 pub mod index;
+pub mod iterator;
 
 /// The command processor for ToyDB.
 pub struct Engine {

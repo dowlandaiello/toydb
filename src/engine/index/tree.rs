@@ -1,17 +1,25 @@
-// TODO: Make this less god awful
-
 use super::{
-    super::super::{
-        error::Error,
-        items::{BTreeInternalNode, BTreeLeafNode, Record, RecordId, RecordIdPointer},
-        util::fs,
+    super::{
+        super::{
+            error::Error,
+            items::{BTreeInternalNode, BTreeLeafNode, Page, RecordId, RecordIdPointer, Tuple},
+            util::fs,
+        },
+        buffer_pool::{DbHandle, LoadPage},
+        iterator::Next,
     },
     GetKey, InsertKey,
 };
-use actix::{Actor, AsyncContext, Context, Handler, Message, ResponseFuture};
+use actix::{Actor, Addr, AsyncContext, Context, Handler, Message, ResponseFuture};
 use futures::future::BoxFuture;
 use prost::Message as ProstMessage;
-use std::{io::SeekFrom, sync::Arc};
+use std::{
+    borrow::BorrowMut,
+    collections::HashMap,
+    io::SeekFrom,
+    ops::{Deref, DerefMut},
+    sync::Arc,
+};
 use tokio::{
     fs::File,
     io::{AsyncReadExt, AsyncSeekExt, AsyncWriteExt},
@@ -20,6 +28,16 @@ use tokio::{
 
 /// The number of children per node in the B+ tree
 pub const ORDER: usize = 4;
+
+/// A message requesting that an actor create a new iterator.
+#[derive(Message)]
+#[rtype(result = "Result<Addr<TreeHandleIterator>, Error>")]
+pub struct Iter(Addr<DbHandle>);
+
+/// Gets the next leaf node from the seeker identified by the ID.
+#[derive(Message)]
+#[rtype(result = "Result<BTreeLeafNode, Error>")]
+struct NextLeaf(Addr<TreeHandleIterator>);
 
 /// Specifies whether the user is looking for a leaf node to insert into or a suitable parent node to insert a leaf node as a child of.
 #[derive(PartialEq)]
@@ -167,7 +185,7 @@ fn left_values_internal(node: &BTreeInternalNode) -> Vec<(u64, u64)> {
     node.keys
         .iter()
         .zip(node.child_pointers.iter())
-        .filter(|(k, v)| k < &&med)
+        .filter(|(k, _v)| k < &&med)
         .map(|(k, v)| (k.clone(), v.clone()))
         .collect::<Vec<(u64, u64)>>()
 }
@@ -199,7 +217,7 @@ fn left_values_leaf(node: &BTreeLeafNode) -> Vec<(u64, RecordIdPointer)> {
     node.keys
         .iter()
         .zip(node.disk_pointers.iter())
-        .filter(|(k, v)| k < &&med)
+        .filter(|(k, _v)| k < &&med)
         .map(|(k, v)| (k.clone(), v.clone()))
         .collect::<Vec<(u64, RecordIdPointer)>>()
 }
@@ -211,7 +229,7 @@ fn right_values_leaf(node: &BTreeLeafNode) -> Vec<(u64, RecordIdPointer)> {
     node.keys
         .iter()
         .zip(node.disk_pointers.iter())
-        .filter(|(k, v)| k >= &&med)
+        .filter(|(k, _v)| k >= &&med)
         .map(|(k, v)| (k.clone(), v.clone()))
         .collect::<Vec<(u64, RecordIdPointer)>>()
 }
@@ -221,7 +239,7 @@ fn get_leaf(node: BTreeLeafNode, k: u64) -> Option<RecordIdPointer> {
     node.keys
         .iter()
         .zip(node.disk_pointers.iter())
-        .find(|(k_curr, v)| k_curr == &&k)
+        .find(|(k_curr, _v)| k_curr == &&k)
         .map(|(_, v)| v.clone())
 }
 
@@ -295,6 +313,82 @@ fn follow_node(
 /// An abstraction representing a handle to a B+ tree index file for a database.
 pub struct TreeHandle {
     handle: Arc<Mutex<File>>,
+    seekers: Arc<Mutex<HashMap<Addr<TreeHandleIterator>, Vec<BTreeLeafNode>>>>,
+}
+
+impl TreeHandle {
+    /// Constructs a plan of leaf nodes to iterate through
+    fn collect_nodes(
+        mut handle: OwnedMutexGuard<File>,
+        curr_pos: u64,
+    ) -> BoxFuture<
+        'static,
+        Result<(Vec<BTreeLeafNode>, OwnedMutexGuard<File>), (Error, OwnedMutexGuard<File>)>,
+    > {
+        Box::pin(async move {
+            if let Err(e) = handle.seek(SeekFrom::Start(curr_pos)).await {
+                return Err((Error::IoError(e), handle));
+            }
+
+            // Peek 10 bytes for the length prefix
+            let mut length_delim_buff: [u8; 10] = [0; 10];
+            if let Err(e) = handle.read(&mut length_delim_buff).await {
+                return Err((Error::IoError(e), handle));
+            }
+            let length_delim =
+                match prost::decode_length_delimiter(&mut length_delim_buff.as_slice()) {
+                    Ok(v) => v,
+                    Err(e) => {
+                        return Err((Error::DecodeError(e), handle));
+                    }
+                };
+
+            // Make a buffer for the size of the node
+            let mut node_buff: Vec<u8> = vec![0; length_delim];
+
+            // Read into the buff
+            if let Err(e) = handle.seek(SeekFrom::Current(curr_pos as i64)).await {
+                return Err((Error::IoError(e), handle));
+            }
+            if let Err(e) = handle.read(&mut node_buff).await {
+                return Err((Error::IoError(e), handle));
+            }
+
+            // Read a node from the buff
+            let node = match BTreeInternalNode::decode_length_delimited(node_buff.as_slice()) {
+                Ok(v) => v,
+                Err(e) => {
+                    return Err((Error::DecodeError(e), handle));
+                }
+            };
+            if node.is_leaf_node {
+                let node = match BTreeLeafNode::decode_length_delimited(node_buff.as_slice()) {
+                    Ok(v) => v,
+                    Err(e) => {
+                        return Err((Error::DecodeError(e), handle));
+                    }
+                };
+                return Ok((vec![node], handle));
+            }
+
+            let mut leaves = Vec::new();
+
+            // Get all child nodes and join
+            for c_pointer in node.child_pointers {
+                let (mut c_pointer_children, got_handle) =
+                    match Self::collect_nodes(handle, c_pointer).await {
+                        Ok(v) => v,
+                        Err(e) => {
+                            return Err(e);
+                        }
+                    };
+                leaves.append(&mut c_pointer_children);
+                handle = got_handle;
+            }
+
+            Ok((leaves, handle))
+        })
+    }
 }
 
 impl Actor for TreeHandle {
@@ -498,6 +592,124 @@ impl Handler<InsertKey> for TreeHandle {
             }
 
             addr.send(msg).await.map_err(|e| Error::MailboxError(e))?
+        })
+    }
+}
+
+impl Handler<NextLeaf> for TreeHandle {
+    type Result = ResponseFuture<Result<BTreeLeafNode, Error>>;
+
+    fn handle(&mut self, msg: NextLeaf, _context: &mut Context<Self>) -> Self::Result {
+        let seekers = self.seekers.clone();
+
+        Box::pin(async move {
+            let mut seekers = seekers.lock().await;
+
+            // If the entry does not exist, make it
+            if let None = seekers.get(&msg.0) {
+                seekers.insert(msg.0.clone(), Vec::new());
+            }
+
+            // If there are no locations left to go back to, we are done
+            let seeker_progress = seekers.get_mut(&msg.0).ok_or(Error::TraversalError)?;
+            let next_node = seeker_progress.remove(0);
+
+            Ok(next_node)
+        })
+    }
+}
+
+impl Handler<Iter> for TreeHandle {
+    type Result = ResponseFuture<Result<Addr<TreeHandleIterator>, Error>>;
+
+    fn handle(&mut self, msg: Iter, context: &mut Context<Self>) -> Self::Result {
+        let seekers = self.seekers.clone();
+        let handle = self.handle.clone();
+        let addr = context.address();
+
+        Box::pin(async move {
+            let handle = handle.lock_owned().await;
+
+            let iter = TreeHandleIterator {
+                curr_leaf_idx: Arc::new(Mutex::new(None)),
+                curr_leaf_node: Arc::new(Mutex::new(None)),
+                handle: addr,
+                handle_data: msg.0,
+            }
+            .start();
+            let mut seekers = seekers.lock().await;
+
+            let (res, _) = match Self::collect_nodes(handle, 0).await {
+                Ok(x) => x,
+                Err((e, _)) => {
+                    return Err(e);
+                }
+            };
+
+            seekers.insert(iter.clone(), res);
+
+            Ok(iter)
+        })
+    }
+}
+
+pub struct TreeHandleIterator {
+    handle: Addr<TreeHandle>,
+    handle_data: Addr<DbHandle>,
+    curr_leaf_node: Arc<Mutex<Option<BTreeLeafNode>>>,
+    curr_leaf_idx: Arc<Mutex<Option<usize>>>,
+}
+
+impl Actor for TreeHandleIterator {
+    type Context = Context<Self>;
+}
+
+impl Handler<Next> for TreeHandleIterator {
+    type Result = ResponseFuture<Option<Tuple>>;
+
+    fn handle(&mut self, _msg: Next, context: &mut Context<Self>) -> Self::Result {
+        let handle = self.handle.clone();
+        let handle_data = self.handle_data.clone();
+        let curr_leaf_node_handle = self.curr_leaf_node.clone();
+        let curr_leaf_idx = self.curr_leaf_idx.clone();
+
+        let addr = context.address();
+
+        Box::pin(async move {
+            let mut curr_leaf_node = curr_leaf_node_handle.lock().await;
+            let mut curr_leaf_idx = curr_leaf_idx.lock().await;
+
+            // Load the next leaf node if we have no leaf node
+            let (mut curr_leaf, mut curr_idx): (BTreeLeafNode, usize) =
+                if let Some(curr) = (curr_leaf_node.clone()).zip(curr_leaf_idx.clone()) {
+                    curr
+                } else {
+                    let node = handle.send(NextLeaf(addr.clone())).await.ok()?.ok()?;
+                    curr_leaf_node.replace(node.clone());
+                    (node, 0)
+                };
+
+            // If we are out of bounds, load a new leaf
+            if curr_idx >= curr_leaf.keys.len() {
+                (curr_leaf, curr_idx) = (handle.send(NextLeaf(addr)).await.ok()?.ok()?, 0);
+            }
+
+            // Get the next item
+            let rid = &curr_leaf.disk_pointers[curr_idx];
+            curr_leaf_idx.replace(curr_idx + 1);
+
+            // Load from the heap file
+            let res: Result<Page, Error> = handle_data
+                .send(LoadPage(rid.page as usize))
+                .await
+                .map_err(|e| Error::MailboxError(e))
+                .ok()?;
+            let page = res.ok()?;
+
+            let tup_bytes = page.data.get(rid.page_idx as usize)?;
+            let tup = Tuple::decode_length_delimited(tup_bytes.data.as_slice()).ok()?;
+
+            Some(tup)
         })
     }
 }

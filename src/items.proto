@@ -34,3 +34,11 @@ message Page {
 	uint64 space_used = 1;
 	repeated Record data = 2;
 }
+
+message Tuple {
+	repeated Element elements = 1;
+}
+
+message Element {
+	bytes data = 1;
+}
