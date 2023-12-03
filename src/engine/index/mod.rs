@@ -16,21 +16,22 @@ use tree::TreeHandle;
 const MAX_TENANTS: usize = PAGE_SIZE * 4;
 
 /// A request to open or fetch an existing index for a database.
-#[derive(Message)]
+#[derive(Message, Debug)]
 #[rtype(result = "Result<Addr<IndexHandle>, Error>")]
 pub struct GetIndex(pub TableName);
 
 /// Gets a record pointer from a key.
-#[derive(Message)]
+#[derive(Message, Debug)]
 #[rtype(result = "Result<RecordId, Error>")]
 pub struct GetKey(u64);
 
 /// Inserts a record pointer at a key.
-#[derive(Message)]
+#[derive(Message, Debug)]
 #[rtype(result = "Result<(), Error>")]
 pub struct InsertKey(pub u64, pub RecordId);
 
 /// An open abstraction representing a cached index for a database.
+#[derive(Debug)]
 pub struct IndexHandle {
     // Physical file representation
     tree_handle: Addr<TreeHandle>,
@@ -47,7 +48,10 @@ impl Actor for IndexHandle {
 impl Handler<GetKey> for IndexHandle {
     type Result = ResponseActFuture<Self, Result<RecordId, Error>>;
 
+    #[tracing::instrument]
     fn handle(&mut self, msg: GetKey, _ctx: &mut Context<Self>) -> Self::Result {
+        tracing::info!("probing key in index");
+
         // If the record is stored in cache, use that instead of resorting to disk
         if let Some(rid) = self.record_cache.get(&msg.0) {
             return Box::pin(future::ready(Ok(rid.clone())).into_actor(self));
@@ -80,9 +84,12 @@ impl Handler<GetKey> for IndexHandle {
 }
 
 impl Handler<InsertKey> for IndexHandle {
-    type Result = ResponseFuture<Result<(), Error>>;
+    type Result = ResponseActFuture<Self, Result<(), Error>>;
 
+    #[tracing::instrument]
     fn handle(&mut self, msg: InsertKey, _ctx: &mut Context<Self>) -> Self::Result {
+        tracing::info!("inserting key into index");
+
         self.record_cache.insert(msg.0, msg.1.clone());
         self.last_used.insert(0, msg.0);
 
@@ -94,16 +101,19 @@ impl Handler<InsertKey> for IndexHandle {
 
         let tree_handle = self.tree_handle.clone();
 
-        Box::pin(async move {
-            tree_handle
-                .send(msg)
-                .await
-                .map_err(|e| Error::MailboxError(e))?
-        })
+        Box::pin(
+            async move {
+                tree_handle
+                    .send(msg)
+                    .await
+                    .map_err(|e| Error::MailboxError(e))?
+            }
+            .into_actor(self),
+        )
     }
 }
 
-#[derive(Default)]
+#[derive(Default, Debug)]
 pub struct IndexPool {
     indexes: HashMap<TableName, Addr<IndexHandle>>,
 }
@@ -115,7 +125,10 @@ impl Actor for IndexPool {
 impl Handler<GetIndex> for IndexPool {
     type Result = ResponseActFuture<Self, Result<Addr<IndexHandle>, Error>>;
 
+    #[tracing::instrument]
     fn handle(&mut self, msg: GetIndex, _ctx: &mut Context<Self>) -> Self::Result {
+        tracing::info!("requesting index from index pool");
+
         if let Some(handle) = self.indexes.get(&msg.0) {
             return Box::pin(future::ready(Ok(handle.clone())).into_actor(self));
         }
@@ -141,7 +154,7 @@ impl Handler<GetIndex> for IndexPool {
             Ok((f, meta))
         }
         .into_actor(self)
-        .map_ok(|(f, meta), slf, _ctx| {
+        .map_ok(|(f, _), slf, _ctx| {
             let tree_handle = TreeHandle {
                 handle: Arc::new(Mutex::new(f)),
                 seekers: Arc::new(Mutex::new(HashMap::new())),

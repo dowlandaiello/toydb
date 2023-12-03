@@ -8,7 +8,9 @@ use toydb::{
 
 #[actix_rt::main]
 async fn main() -> IoResult<()> {
-    let engine = Engine::start().await;
+    tracing_subscriber::fmt::init();
+
+    let engine = Engine::start().await.expect("Engine to start");
     let rpc = Server::new()
         .with_data(Data::new(engine))
         .with_method("create_database", create_database)

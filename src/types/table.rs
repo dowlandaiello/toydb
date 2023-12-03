@@ -8,7 +8,7 @@ use serde::{Deserialize, Serialize};
 pub type TableName = String;
 
 /// A type of a value in a column in a table.
-#[derive(Serialize, Deserialize)]
+#[derive(Serialize, Deserialize, Debug)]
 pub enum Ty {
     String,
     Integer,
@@ -47,6 +47,7 @@ impl From<Ty> for Vec<u8> {
 }
 
 /// A logical representation of a tuple as a catalogue.
+#[derive(Debug)]
 pub struct CatalogueEntry {
     pub table_name: String,
     pub file_name: String,

@@ -21,32 +21,32 @@ use tokio::{
 pub const PAGE_SIZE: usize = 8_000;
 
 /// A request to open or fetch an existing buffer for a database.
-#[derive(Message)]
+#[derive(Message, Debug)]
 #[rtype(result = "Result<Addr<DbHandle>, Error>")]
 pub struct GetBuffer(pub DbName);
 
 /// A request to load a page from the heap file.
-#[derive(Message)]
+#[derive(Message, Debug)]
 #[rtype(result = "Result<Page, Error>")]
 pub struct LoadPage(pub PageId);
 
 /// A request to load the last page in the heap file.
-#[derive(Message)]
+#[derive(Message, Debug)]
 #[rtype(result = "Result<Option<(Page, PageId)>, Error>")]
 pub struct LoadHead;
 
 /// A request to create a new page in the heap file.
-#[derive(Message)]
+#[derive(Message, Debug)]
 #[rtype(result = "Result<(Page, PageId), Error>")]
 pub struct NewPage;
 
 /// A request to write a page to a heap file.
-#[derive(Message)]
+#[derive(Message, Debug)]
 #[rtype(result = "Result<(), Error>")]
 pub struct WritePage(pub PageId, pub Page);
 
 /// A pool of buffers for databases.
-#[derive(Default)]
+#[derive(Default, Debug)]
 pub struct BufferPool {
     pools: HashMap<DbName, Addr<DbHandle>>,
 }
@@ -58,7 +58,10 @@ impl Actor for BufferPool {
 impl Handler<GetBuffer> for BufferPool {
     type Result = ResponseActFuture<Self, Result<Addr<DbHandle>, Error>>;
 
+    #[tracing::instrument]
     fn handle(&mut self, msg: GetBuffer, _ctx: &mut Context<Self>) -> Self::Result {
+        tracing::info!("obtaining buffer");
+
         // If the buffer pool is already open, return it
         if let Some(handle) = self.pools.get(&msg.0) {
             return Box::pin(future::ready(Ok(handle.clone())).into_actor(self));
@@ -71,6 +74,8 @@ impl Handler<GetBuffer> for BufferPool {
                 return Box::pin(future::ready(Err(e)).into_actor(self));
             }
         };
+
+        tracing::info!("creating new buffer file");
 
         // Open the database file, or create it if it doesn't exist
         let open_fut = async move {
@@ -103,6 +108,7 @@ impl Handler<GetBuffer> for BufferPool {
 }
 
 /// An open instance of a database (i.e., a buffer pool).
+#[derive(Debug)]
 pub struct DbHandle {
     handle: Arc<Mutex<File>>,
     pages: Vec<Option<Page>>,
@@ -115,7 +121,10 @@ impl Actor for DbHandle {
 impl Handler<LoadPage> for DbHandle {
     type Result = ResponseActFuture<Self, Result<Page, Error>>;
 
+    #[tracing::instrument]
     fn handle(&mut self, msg: LoadPage, _ctx: &mut Context<Self>) -> Self::Result {
+        tracing::info!("loading page");
+
         // If the page already exists, return it
         if let Some(Some(page)) = self.pages.get(msg.0) {
             return Box::pin(future::ready(Ok(page.clone())).into_actor(self));
@@ -177,9 +186,12 @@ impl Handler<LoadHead> for DbHandle {
 }
 
 impl Handler<NewPage> for DbHandle {
-    type Result = ResponseFuture<Result<(Page, PageId), Error>>;
+    type Result = ResponseActFuture<Self, Result<(Page, PageId), Error>>;
 
+    #[tracing::instrument]
     fn handle(&mut self, _msg: NewPage, ctx: &mut Context<Self>) -> Self::Result {
+        tracing::info!("requesting new page");
+
         // Create the page in memory
         let page = Page::default();
 
@@ -190,20 +202,26 @@ impl Handler<NewPage> for DbHandle {
         let addr = ctx.address();
 
         // Write the new page to the disk
-        Box::pin(async move {
-            addr.send(WritePage(head_idx, page.clone()))
-                .map_err(|e| Error::MailboxError(e))
-                .await??;
+        Box::pin(
+            async move {
+                addr.send(WritePage(head_idx, page.clone()))
+                    .map_err(|e| Error::MailboxError(e))
+                    .await??;
 
-            Ok((page, head_idx))
-        })
+                Ok((page, head_idx))
+            }
+            .into_actor(self),
+        )
     }
 }
 
 impl Handler<WritePage> for DbHandle {
-    type Result = ResponseFuture<Result<(), Error>>;
+    type Result = ResponseActFuture<Self, Result<(), Error>>;
 
+    #[tracing::instrument]
     fn handle(&mut self, msg: WritePage, _ctx: &mut Context<Self>) -> Self::Result {
+        tracing::info!("writing page");
+
         // Write the page to memory
         self.pages[msg.0] = Some(msg.1.clone());
 
@@ -229,6 +247,6 @@ impl Handler<WritePage> for DbHandle {
             Ok(())
         };
 
-        Box::pin(write_fut)
+        Box::pin(write_fut.into_actor(self))
     }
 }

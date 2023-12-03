@@ -10,7 +10,7 @@ use cmd::ddl::{CreateDatabase, CreateTable};
 use heap::HeapHandle;
 use index::{GetIndex, IndexPool};
 
-use actix::{Actor, Addr, Context, Handler, ResponseFuture};
+use actix::{Actor, Addr, Context, Handler, ResponseActFuture, ResponseFuture, WrapFuture};
 use tokio::fs::OpenOptions;
 
 pub mod buffer_pool;
@@ -21,6 +21,7 @@ pub mod index;
 pub mod iterator;
 
 /// The command processor for ToyDB.
+#[derive(Debug)]
 pub struct Engine {
     buffer_pool: Addr<BufferPool>,
     index_pool: Addr<IndexPool>,
@@ -28,8 +29,11 @@ pub struct Engine {
 }
 
 impl Engine {
+    #[tracing::instrument]
     pub async fn start() -> Result<Addr<Self>, Error> {
         // Obtain the path for the database to use
+        tracing::info!("opening catalogue data file");
+
         let db_path = fs::db_file_path_with_name(fs::CATALOGUE_TABLE_NAME)?;
 
         // Open the database file, or create it if it doesn't exist
@@ -42,7 +46,10 @@ impl Engine {
             .map_err(|e| Error::IoError(e))?;
         let meta = f.metadata().await.map_err(|e| Error::IoError(e))?;
 
+        tracing::info!("spawning buffer pool");
         let buffer_pool = BufferPool::start_default();
+
+        tracing::info!("spawning index pool");
         let index_pool = IndexPool::start_default();
 
         let db_handle = buffer_pool
@@ -64,6 +71,8 @@ impl Engine {
 
         // Write the catalogue entries to the catalogue
         if meta.len() == 0 {
+            tracing::info!("creating system catalogue");
+
             let entries = ["table_name", "file_name", "attr_name", "ty"]
                 .into_iter()
                 .filter_map(|attr| {
@@ -100,50 +109,62 @@ impl Actor for Engine {
 }
 
 impl Handler<CreateTable> for Engine {
-    type Result = ResponseFuture<Result<(), Error>>;
+    type Result = ResponseActFuture<Self, Result<(), Error>>;
 
+    #[tracing::instrument]
     fn handle(&mut self, msg: CreateTable, _ctx: &mut Context<Self>) -> Self::Result {
+        tracing::info!("creating table");
+
         let CreateTable(db_name, table_name, elements) = msg;
         let catalogue = self.catalogue.clone();
 
-        Box::pin(async move {
-            // Get catalogue entries for all columns in the database
-            let entries = elements.into_iter().filter_map(|(attr_name, ty)| {
-                Some(CatalogueEntry {
-                    table_name: table_name.clone(),
-                    file_name: fs::db_file_path_with_name(db_name.as_str())
-                        .ok()?
-                        .to_str()?
-                        .to_owned(),
-                    attr_name,
-                    ty,
-                })
-            });
+        Box::pin(
+            async move {
+                // Get catalogue entries for all columns in the database
+                let entries = elements.into_iter().filter_map(|(attr_name, ty)| {
+                    Some(CatalogueEntry {
+                        table_name: table_name.clone(),
+                        file_name: fs::db_file_path_with_name(db_name.as_str())
+                            .ok()?
+                            .to_str()?
+                            .to_owned(),
+                        attr_name,
+                        ty,
+                    })
+                });
 
-            // Write all rel_name descriptor tuples
-            for ent in entries {
-                catalogue
-                    .send(InsertEntry(ent))
-                    .await
-                    .map_err(|e| Error::MailboxError(e))??;
+                // Write all rel_name descriptor tuples
+                for ent in entries {
+                    catalogue
+                        .send(InsertEntry(ent))
+                        .await
+                        .map_err(|e| Error::MailboxError(e))??;
+                }
+
+                Ok(())
             }
-
-            Ok(())
-        })
+            .into_actor(self),
+        )
     }
 }
 
 impl Handler<CreateDatabase> for Engine {
-    type Result = ResponseFuture<Result<Addr<DbHandle>, Error>>;
+    type Result = ResponseActFuture<Self, Result<Addr<DbHandle>, Error>>;
 
+    #[tracing::instrument]
     fn handle(&mut self, msg: CreateDatabase, _ctx: &mut Context<Self>) -> Self::Result {
+        tracing::info!("creating database");
+
         let buffer_pool = self.buffer_pool.clone();
 
-        Box::pin(async move {
-            buffer_pool
-                .send(GetBuffer(msg.0))
-                .await
-                .map_err(|e| Error::MailboxError(e))?
-        })
+        Box::pin(
+            async move {
+                buffer_pool
+                    .send(GetBuffer(msg.0))
+                    .await
+                    .map_err(|e| Error::MailboxError(e))?
+            }
+            .into_actor(self),
+        )
     }
 }

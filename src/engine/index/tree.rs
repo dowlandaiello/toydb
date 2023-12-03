@@ -13,13 +13,7 @@ use super::{
 use actix::{Actor, Addr, AsyncContext, Context, Handler, Message, ResponseFuture};
 use futures::future::BoxFuture;
 use prost::Message as ProstMessage;
-use std::{
-    borrow::BorrowMut,
-    collections::HashMap,
-    io::SeekFrom,
-    ops::{Deref, DerefMut},
-    sync::Arc,
-};
+use std::{collections::HashMap, io::SeekFrom, sync::Arc};
 use tokio::{
     fs::File,
     io::{AsyncReadExt, AsyncSeekExt, AsyncWriteExt},
@@ -125,7 +119,7 @@ fn len_internal_child_pointers(node: &BTreeInternalNode) -> usize {
 fn len_leaf_disk_pointers(node: &BTreeLeafNode) -> usize {
     node.disk_pointers
         .iter()
-        .filter(|x| x.is_empty)
+        .filter(|x| !x.is_empty)
         .collect::<Vec<&RecordIdPointer>>()
         .len()
 }
@@ -711,5 +705,60 @@ impl Handler<Next> for TreeHandleIterator {
 
             Some(tup)
         })
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_insert_internal() {
+        let mut node = create_internal_node();
+        insert_internal(&mut node, Some(1), 1).expect("to succeed");
+
+        assert_eq!(len_internal_keys(&node), 1);
+        assert_eq!(len_internal_child_pointers(&node), 1);
+
+        insert_internal(&mut node, None, 2).expect("to succeed");
+
+        assert_eq!(len_internal_keys(&node), 1);
+        assert_eq!(len_internal_child_pointers(&node), 2);
+    }
+
+    #[test]
+    fn test_insert_leaf() {
+        let mut node = create_leaf_node();
+
+        assert_eq!(len_leaf_node_keys(&node), 0);
+        assert_eq!(len_leaf_disk_pointers(&node), 0);
+
+        insert_leaf(
+            &mut node,
+            1,
+            RecordIdPointer {
+                is_empty: false,
+                page: 0,
+                page_idx: 0,
+            },
+        )
+        .expect("to succeed");
+
+        assert_eq!(len_leaf_node_keys(&node), 1);
+        assert_eq!(len_leaf_disk_pointers(&node), 1);
+
+        insert_leaf(
+            &mut node,
+            2,
+            RecordIdPointer {
+                is_empty: false,
+                page: 1,
+                page_idx: 0,
+            },
+        )
+        .expect("to succeed");
+
+        assert_eq!(len_leaf_node_keys(&node), 2);
+        assert_eq!(len_leaf_disk_pointers(&node), 2);
     }
 }
