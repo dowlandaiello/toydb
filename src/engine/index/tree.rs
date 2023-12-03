@@ -312,8 +312,8 @@ fn follow_node(
 
 /// An abstraction representing a handle to a B+ tree index file for a database.
 pub struct TreeHandle {
-    handle: Arc<Mutex<File>>,
-    seekers: Arc<Mutex<HashMap<Addr<TreeHandleIterator>, Vec<BTreeLeafNode>>>>,
+    pub handle: Arc<Mutex<File>>,
+    pub seekers: Arc<Mutex<HashMap<Addr<TreeHandleIterator>, Vec<BTreeLeafNode>>>>,
 }
 
 impl TreeHandle {

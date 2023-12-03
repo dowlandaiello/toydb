@@ -1,18 +1,24 @@
 pub mod tree;
 
 use super::{
-    super::{error::Error, items::RecordId},
+    super::{error::Error, items::RecordId, types::table::TableName, util::fs},
     buffer_pool::PAGE_SIZE,
 };
 use actix::{
     Actor, ActorTryFutureExt, Addr, Context, Handler, Message, ResponseActFuture, ResponseFuture,
     WrapFuture,
 };
-use std::{collections::HashMap, future};
+use std::{collections::HashMap, future, sync::Arc};
+use tokio::{fs::OpenOptions, sync::Mutex};
 use tree::TreeHandle;
 
 /// 4 pages can fit in an index cache
 const MAX_TENANTS: usize = PAGE_SIZE * 4;
+
+/// A request to open or fetch an existing index for a database.
+#[derive(Message)]
+#[rtype(result = "Result<Addr<IndexHandle>, Error>")]
+pub struct GetIndex(pub TableName);
 
 /// Gets a record pointer from a key.
 #[derive(Message)]
@@ -22,7 +28,7 @@ pub struct GetKey(u64);
 /// Inserts a record pointer at a key.
 #[derive(Message)]
 #[rtype(result = "Result<(), Error>")]
-pub struct InsertKey(u64, RecordId);
+pub struct InsertKey(pub u64, pub RecordId);
 
 /// An open abstraction representing a cached index for a database.
 pub struct IndexHandle {
@@ -94,5 +100,67 @@ impl Handler<InsertKey> for IndexHandle {
                 .await
                 .map_err(|e| Error::MailboxError(e))?
         })
+    }
+}
+
+#[derive(Default)]
+pub struct IndexPool {
+    indexes: HashMap<TableName, Addr<IndexHandle>>,
+}
+
+impl Actor for IndexPool {
+    type Context = Context<Self>;
+}
+
+impl Handler<GetIndex> for IndexPool {
+    type Result = ResponseActFuture<Self, Result<Addr<IndexHandle>, Error>>;
+
+    fn handle(&mut self, msg: GetIndex, _ctx: &mut Context<Self>) -> Self::Result {
+        if let Some(handle) = self.indexes.get(&msg.0) {
+            return Box::pin(future::ready(Ok(handle.clone())).into_actor(self));
+        }
+
+        // Obtain the path for the database to use
+        let db_path = match fs::index_file_path_with_name(msg.0.as_str()) {
+            Ok(p) => p,
+            Err(e) => {
+                return Box::pin(future::ready(Err(e)).into_actor(self));
+            }
+        };
+
+        // Open the database file, or create it if it doesn't exist
+        let open_fut = async move {
+            let f = OpenOptions::new()
+                .read(true)
+                .write(true)
+                .create(true)
+                .open(db_path)
+                .await?;
+            let meta = f.metadata().await?;
+
+            Ok((f, meta))
+        }
+        .into_actor(self)
+        .map_ok(|(f, meta), slf, _ctx| {
+            let tree_handle = TreeHandle {
+                handle: Arc::new(Mutex::new(f)),
+                seekers: Arc::new(Mutex::new(HashMap::new())),
+            }
+            .start();
+
+            // Create enough empty page slots to store the entire file's contents
+            let act = IndexHandle {
+                tree_handle,
+                record_cache: HashMap::new(),
+                last_used: Vec::new(),
+            }
+            .start();
+            slf.indexes.insert(msg.0, act.clone());
+
+            act
+        })
+        .map_err(|e, _, _| Error::IoError(e));
+
+        Box::pin(open_fut)
     }
 }

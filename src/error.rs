@@ -1,4 +1,5 @@
 use actix::MailboxError;
+use jsonrpc_v2::ErrorLike;
 use prost::{DecodeError, EncodeError};
 use std::{error::Error as StdError, fmt};
 use tokio::io::Error as IoError;
@@ -55,6 +56,24 @@ impl StdError for Error {
             | Self::RecordNotFound
             | Self::TraversalError
             | Self::MiscDecodeError => None,
+        }
+    }
+}
+
+impl ErrorLike for Error {
+    fn code(&self) -> i64 {
+        match self {
+            Self::XdgError(_) => 0,
+            Self::IoError(_) => 1,
+            Self::MailboxError(_) => 2,
+            Self::PageOutOfBounds => 3,
+            Self::MutexError => 4,
+            Self::ConversionError => 5,
+            Self::RecordNotFound => 6,
+            Self::TraversalError => 7,
+            Self::DecodeError(_) => 8,
+            Self::EncodeError(_) => 9,
+            Self::MiscDecodeError => 10,
         }
     }
 }

@@ -14,7 +14,7 @@ use tokio::sync::Mutex;
 /// Inserts a record at the end of the heap file.
 #[derive(Message)]
 #[rtype(result = "Result<RecordId, Error>")]
-pub struct InsertRecord(Record);
+pub struct InsertRecord(pub Record);
 
 /// Loads a record from the heap file.
 #[derive(Message)]
@@ -32,7 +32,7 @@ pub struct Iter;
 /// - Deletion of records by RID
 /// - Retrieval of records by RID
 pub struct HeapHandle {
-    buffer: Addr<DbHandle>,
+    pub buffer: Addr<DbHandle>,
 }
 
 impl Actor for HeapHandle {
