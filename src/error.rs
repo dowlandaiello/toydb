@@ -16,6 +16,7 @@ pub enum Error {
     TraversalError,
     DecodeError(DecodeError),
     EncodeError(EncodeError),
+    MiscDecodeError,
 }
 
 impl fmt::Display for Error {
@@ -35,6 +36,7 @@ impl fmt::Display for Error {
             Self::TraversalError => write!(f, "failed to correctly traverse a tree structure"),
             Self::DecodeError(e) => write!(f, "failed to decode a message with protobuf: {:?}", e),
             Self::EncodeError(e) => write!(f, "failed to encode a message with protobuf: {:?}", e),
+            Self::MiscDecodeError => write!(f, "failed to parse the message"),
         }
     }
 }
@@ -51,7 +53,8 @@ impl StdError for Error {
             | Self::MutexError
             | Self::ConversionError
             | Self::RecordNotFound
-            | Self::TraversalError => None,
+            | Self::TraversalError
+            | Self::MiscDecodeError => None,
         }
     }
 }
