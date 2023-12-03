@@ -1,12 +1,15 @@
 use super::{
     super::{
         error::Error,
-        items::{Record, RecordId},
+        items::{Record, RecordId, Tuple},
     },
     buffer_pool::{DbHandle, LoadHead, LoadPage, NewPage, WritePage, PAGE_SIZE},
+    iterator::Next,
 };
-use actix::{Actor, Addr, Context, Handler, Message, ResponseFuture};
-use std::future;
+use actix::{Actor, Addr, AsyncContext, Context, Handler, Message, ResponseFuture};
+use prost::Message as ProstMessage;
+use std::{future, sync::Arc};
+use tokio::sync::Mutex;
 
 /// Inserts a record at the end of the heap file.
 #[derive(Message)]
@@ -17,6 +20,11 @@ pub struct InsertRecord(Record);
 #[derive(Message)]
 #[rtype(result = "Result<Record, Error>")]
 pub struct LoadRecord(RecordId);
+
+/// A message sent to a heaphandle that generates a new iterator.
+#[derive(Message)]
+#[rtype(result = "Addr<HeapHandleIterator>")]
+pub struct Iter;
 
 /// An open heap abstraction.
 /// Allows:
@@ -102,6 +110,68 @@ impl Handler<LoadRecord> for HeapHandle {
                 .cloned()?;
 
             Ok(val)
+        })
+    }
+}
+
+impl Handler<Iter> for HeapHandle {
+    type Result = Addr<HeapHandleIterator>;
+
+    fn handle(&mut self, _msg: Iter, ctx: &mut Context<Self>) -> Self::Result {
+        let addr = ctx.address();
+        HeapHandleIterator {
+            handle: addr,
+            curr_rid: Arc::new(Mutex::new(RecordId::default())),
+        }
+        .start()
+    }
+}
+
+/// A seeker that can iterate through the tuples in a heap file.
+pub struct HeapHandleIterator {
+    handle: Addr<HeapHandle>,
+    curr_rid: Arc<Mutex<RecordId>>,
+}
+
+impl Actor for HeapHandleIterator {
+    type Context = Context<Self>;
+}
+
+impl Handler<Next> for HeapHandleIterator {
+    type Result = ResponseFuture<Option<Tuple>>;
+
+    fn handle(&mut self, _msg: Next, _context: &mut Context<Self>) -> Self::Result {
+        let curr_rid_handle = self.curr_rid.clone();
+        let handle = self.handle.clone();
+
+        Box::pin(async move {
+            let mut curr_rid = curr_rid_handle.lock().await;
+
+            let val = match handle
+                .send(LoadRecord((*curr_rid).clone()))
+                .await
+                .ok()?
+                .ok()
+            {
+                Some(v) => v,
+                None => {
+                    *curr_rid = RecordId {
+                        page: curr_rid.page + 1,
+                        page_idx: 0,
+                    };
+
+                    handle
+                        .send(LoadRecord((*curr_rid).clone()))
+                        .await
+                        .ok()?
+                        .ok()?
+                }
+            };
+
+            // Update the current RID
+            curr_rid.page_idx += 1;
+
+            Some(Tuple::decode_length_delimited(val.data.as_slice()).ok()?)
         })
     }
 }
