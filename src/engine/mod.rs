@@ -95,6 +95,8 @@ impl Engine {
             }
         }
 
+        tracing::info!("started");
+
         Ok(Self {
             buffer_pool,
             index_pool,

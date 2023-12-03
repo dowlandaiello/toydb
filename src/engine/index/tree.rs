@@ -10,7 +10,10 @@ use super::{
     },
     GetKey, InsertKey,
 };
-use actix::{Actor, Addr, AsyncContext, Context, Handler, Message, ResponseFuture};
+use actix::{
+    Actor, Addr, AsyncContext, Context, Handler, Message, ResponseActFuture, ResponseFuture,
+    WrapFuture,
+};
 use futures::future::BoxFuture;
 use prost::Message as ProstMessage;
 use std::{collections::HashMap, io::SeekFrom, sync::Arc};
@@ -79,6 +82,7 @@ fn create_internal_node() -> BTreeInternalNode {
 
 fn create_leaf_node() -> BTreeLeafNode {
     let mut node = BTreeLeafNode::default();
+    node.is_leaf_node = true;
     node.keys = vec![0; ORDER];
     node.disk_pointers = vec![
         {
@@ -199,7 +203,7 @@ fn get_internal(node: &BTreeInternalNode, k: u64) -> Option<u64> {
     node.keys
         .iter()
         .zip(node.child_pointers.iter())
-        .filter(|(k_curr, _)| k_curr > &&k)
+        .filter(|(k_curr, _)| k_curr <= &&k)
         .map(|(_, v)| v.clone())
         .next()
 }
@@ -248,29 +252,30 @@ fn follow_node(
         let node = {
             // Get the current node
             handle
-                .seek(SeekFrom::Current(pos as i64))
+                .seek(SeekFrom::Start(pos as u64))
                 .await
                 .map_err(|e| Error::IoError(e))?;
 
             // Peek 10 bytes for the length prefix
             let mut length_delim_buff: [u8; 10] = [0; 10];
             handle
-                .read(&mut length_delim_buff)
+                .read_exact(&mut length_delim_buff)
                 .await
                 .map_err(|e| Error::IoError(e))?;
             let length_delim = prost::decode_length_delimiter(&mut length_delim_buff.as_slice())
                 .map_err(|e| Error::DecodeError(e))?;
+            let delim_len = prost::length_delimiter_len(length_delim);
 
             // Make a buffer for the size of the node
-            let mut node_buff: Vec<u8> = vec![0; length_delim];
+            let mut node_buff: Vec<u8> = vec![0; length_delim + delim_len];
 
             // Read into the buff
             handle
-                .seek(SeekFrom::Current(pos as i64))
+                .seek(SeekFrom::Start(pos as u64))
                 .await
                 .map_err(|e| Error::IoError(e))?;
             handle
-                .read(&mut node_buff)
+                .read_exact(&mut node_buff)
                 .await
                 .map_err(|e| Error::IoError(e))?;
 
@@ -305,6 +310,7 @@ fn follow_node(
 }
 
 /// An abstraction representing a handle to a B+ tree index file for a database.
+#[derive(Debug)]
 pub struct TreeHandle {
     pub handle: Arc<Mutex<File>>,
     pub seekers: Arc<Mutex<HashMap<Addr<TreeHandleIterator>, Vec<BTreeLeafNode>>>>,
@@ -326,7 +332,7 @@ impl TreeHandle {
 
             // Peek 10 bytes for the length prefix
             let mut length_delim_buff: [u8; 10] = [0; 10];
-            if let Err(e) = handle.read(&mut length_delim_buff).await {
+            if let Err(e) = handle.read_exact(&mut length_delim_buff).await {
                 return Err((Error::IoError(e), handle));
             }
             let length_delim =
@@ -336,15 +342,16 @@ impl TreeHandle {
                         return Err((Error::DecodeError(e), handle));
                     }
                 };
+            let length_delim_len = prost::length_delimiter_len(length_delim);
 
             // Make a buffer for the size of the node
-            let mut node_buff: Vec<u8> = vec![0; length_delim];
+            let mut node_buff: Vec<u8> = vec![0; length_delim + length_delim_len];
 
             // Read into the buff
-            if let Err(e) = handle.seek(SeekFrom::Current(curr_pos as i64)).await {
+            if let Err(e) = handle.seek(SeekFrom::Start(curr_pos as u64)).await {
                 return Err((Error::IoError(e), handle));
             }
-            if let Err(e) = handle.read(&mut node_buff).await {
+            if let Err(e) = handle.read_exact(&mut node_buff).await {
                 return Err((Error::IoError(e), handle));
             }
 
@@ -409,184 +416,190 @@ impl Handler<GetKey> for TreeHandle {
 }
 
 impl Handler<InsertKey> for TreeHandle {
-    type Result = ResponseFuture<Result<(), Error>>;
+    type Result = ResponseActFuture<Self, Result<(), Error>>;
 
+    #[tracing::instrument]
     fn handle(&mut self, msg: InsertKey, ctx: &mut Context<Self>) -> Self::Result {
+        tracing::info!("inserting key into indexing tree");
+
         let handle = self.handle.clone();
         let addr = ctx.address();
 
-        Box::pin(async move {
-            {
-                let mut f = handle.lock_owned().await;
-
-                // If the file length is zero, this is the root node. Insert it
-                if fs::file_is_empty(&f).await {
-                    let mut root_node = create_internal_node();
-                    let body_len = root_node.encoded_len();
-                    let len_len = prost::length_delimiter_len(body_len);
-                    root_node.keys[1] = msg.0;
-                    root_node.child_pointers[0] = (body_len + len_len) as u64;
-
-                    let mut leaf_node = create_leaf_node();
-                    insert_leaf(&mut leaf_node, msg.0, msg.1.into())?;
-
-                    // Write the two blocks to the file
-                    f.write_all(root_node.encode_length_delimited_to_vec().as_slice())
-                        .await
-                        .map_err(|e| Error::IoError(e))?;
-                    f.write_all(leaf_node.encode_length_delimited_to_vec().as_slice())
-                        .await
-                        .map_err(|e| Error::IoError(e))?;
-
-                    return Ok(());
-                }
-
-                // Find the leaf node that this belongs in that has space and insert
-                let (candidate_leaf_node, pos, mut f) =
-                    follow_node(f, 0, msg.0, SearchTarget::LeafNode).await?;
-
-                if let SearchResult::LeafNode(mut n) =
-                    candidate_leaf_node.ok_or(Error::RecordNotFound)?
+        Box::pin(
+            async move {
                 {
-                    // Attempt an insert
+                    let mut f = handle.lock_owned().await;
 
-                    if let Ok(_) = insert_leaf(&mut n, msg.0, msg.1.clone().into()) {
-                        // Write the candidate node
-                        f.seek(SeekFrom::Start(pos))
+                    // If the file length is zero, this is the root node. Insert it
+                    if fs::file_is_empty(&f).await {
+                        let mut root_node = create_internal_node();
+                        let body_len = root_node.encoded_len();
+                        let len_len = prost::length_delimiter_len(body_len);
+                        root_node.keys[0] = msg.0;
+                        root_node.child_pointers[0] = (body_len + len_len) as u64;
+
+                        let mut leaf_node = create_leaf_node();
+                        insert_leaf(&mut leaf_node, msg.0, msg.1.into())?;
+
+                        // Write the two blocks to the file
+                        f.write_all(root_node.encode_length_delimited_to_vec().as_slice())
                             .await
                             .map_err(|e| Error::IoError(e))?;
-                        f.write_all(n.encode_length_delimited_to_vec().as_slice())
+                        f.write_all(leaf_node.encode_length_delimited_to_vec().as_slice())
                             .await
                             .map_err(|e| Error::IoError(e))?;
 
                         return Ok(());
                     }
 
-                    // The leaf node is full. Split it by creating an internal node
-                    // with a value of the halfway point of the leaf node and inserting
-                    // a leaf node with half of the values to the left of it
-                    // and a leaf node with the other half of the values to the right of it
-                    let left_vals = left_values_leaf(&n);
-                    let right_vals = right_values_leaf(&n);
-                    let median = median(Node::LeafNode(&n));
+                    // Find the leaf node that this belongs in that has space and insert
+                    let (candidate_leaf_node, pos, mut f) =
+                        follow_node(f, 0, msg.0, SearchTarget::LeafNode).await?;
 
-                    let mut new_parent = create_internal_node();
-                    let mut left = create_leaf_node();
-                    let mut right = create_leaf_node();
+                    if let SearchResult::LeafNode(mut n) =
+                        candidate_leaf_node.ok_or(Error::RecordNotFound)?
+                    {
+                        // Attempt an insert
 
-                    // Copy all nodes less than median into left node
-                    for (k, v) in left_vals {
-                        insert_leaf(&mut left, k, v)?;
+                        if let Ok(_) = insert_leaf(&mut n, msg.0, msg.1.clone().into()) {
+                            // Write the candidate node
+                            f.seek(SeekFrom::Start(pos))
+                                .await
+                                .map_err(|e| Error::IoError(e))?;
+                            f.write_all(n.encode_length_delimited_to_vec().as_slice())
+                                .await
+                                .map_err(|e| Error::IoError(e))?;
+
+                            return Ok(());
+                        }
+
+                        // The leaf node is full. Split it by creating an internal node
+                        // with a value of the halfway point of the leaf node and inserting
+                        // a leaf node with half of the values to the left of it
+                        // and a leaf node with the other half of the values to the right of it
+                        let left_vals = left_values_leaf(&n);
+                        let right_vals = right_values_leaf(&n);
+                        let median = median(Node::LeafNode(&n));
+
+                        let mut new_parent = create_internal_node();
+                        let mut left = create_leaf_node();
+                        let mut right = create_leaf_node();
+
+                        // Copy all nodes less than median into left node
+                        for (k, v) in left_vals {
+                            insert_leaf(&mut left, k, v)?;
+                        }
+
+                        for (k, v) in right_vals {
+                            insert_leaf(&mut right, k, v)?;
+                        }
+
+                        if msg.0 < median {
+                            insert_leaf(&mut left, msg.0, msg.1.into())?;
+                        } else {
+                            insert_leaf(&mut right, msg.0, msg.1.into())?;
+                        }
+
+                        let left_size = left.encoded_len();
+                        let len_len = prost::length_delimiter_len(left_size);
+
+                        // Go to the end of the file to insert the new nodes
+                        let new_nodes_pos = f
+                            .seek(SeekFrom::End(0))
+                            .await
+                            .map_err(|e| Error::IoError(e))?;
+                        f.write_all(left.encode_length_delimited_to_vec().as_slice())
+                            .await
+                            .map_err(|e| Error::IoError(e))?;
+                        f.write_all(right.encode_length_delimited_to_vec().as_slice())
+                            .await
+                            .map_err(|e| Error::IoError(e))?;
+
+                        // Go back to the old node and overwrite it with the new nodes inserted
+                        insert_internal(&mut new_parent, Some(median), new_nodes_pos)?;
+                        insert_internal(
+                            &mut new_parent,
+                            None,
+                            (new_nodes_pos as usize + left_size + len_len) as u64,
+                        )?;
+
+                        f.seek(SeekFrom::Start(pos))
+                            .await
+                            .map_err(|e| Error::IoError(e))?;
+                        f.write_all(new_parent.encode_length_delimited_to_vec().as_slice())
+                            .await
+                            .map_err(|e| Error::IoError(e))?;
+
+                        return Ok(());
                     }
 
-                    for (k, v) in right_vals {
-                        insert_leaf(&mut right, k, v)?;
+                    // An internal node has overflown. Need to split and then re-run insertion
+                    let (candidate_parent_node, pos, mut f) =
+                        follow_node(f, 0, msg.0, SearchTarget::InternalNode).await?;
+
+                    if let SearchResult::InternalNode(n) =
+                        candidate_parent_node.ok_or(Error::RecordNotFound)?
+                    {
+                        // This shouldn't happen because it would indicate that there is a leaf node already there
+                        // even if the leaf node is full
+                        if len_internal_child_pointers(&n) > ORDER {
+                            return Err(Error::TraversalError);
+                        }
+
+                        // Split the internal node up and then re-run the insertion
+                        let left_vals = left_values_internal(&n);
+                        let right_vals = right_values_internal(&n);
+                        let median = median(Node::InternalNode(&n));
+
+                        let mut new_parent = create_internal_node();
+                        let mut left = create_internal_node();
+                        let mut right = create_internal_node();
+
+                        // Copy all nodes less than median into left node
+                        for (k, v) in left_vals {
+                            insert_internal(&mut left, Some(k), v)?;
+                        }
+
+                        for (k, v) in right_vals {
+                            insert_internal(&mut right, Some(k), v)?;
+                        }
+
+                        // Go to the end of the file to insert the new nodes
+                        let new_nodes_pos = f
+                            .seek(SeekFrom::End(0))
+                            .await
+                            .map_err(|e| Error::IoError(e))?;
+                        f.write_all(left.encode_length_delimited_to_vec().as_slice())
+                            .await
+                            .map_err(|e| Error::IoError(e))?;
+                        f.write_all(right.encode_length_delimited_to_vec().as_slice())
+                            .await
+                            .map_err(|e| Error::IoError(e))?;
+
+                        let parent_size = new_parent.encoded_len();
+                        let len_len = prost::length_delimiter_len(parent_size);
+
+                        // Go back to the old node and overwrite it with the new nodes inserted
+                        insert_internal(&mut new_parent, Some(median), new_nodes_pos)?;
+                        insert_internal(
+                            &mut new_parent,
+                            None,
+                            (new_nodes_pos as usize + len_len + parent_size) as u64,
+                        )?;
+
+                        f.seek(SeekFrom::Start(pos))
+                            .await
+                            .map_err(|e| Error::IoError(e))?;
+                        f.write_all(new_parent.encode_length_delimited_to_vec().as_slice())
+                            .await
+                            .map_err(|e| Error::IoError(e))?;
                     }
-
-                    if msg.0 < median {
-                        insert_leaf(&mut left, msg.0, msg.1.into())?;
-                    } else {
-                        insert_leaf(&mut right, msg.0, msg.1.into())?;
-                    }
-
-                    let left_size = left.encoded_len();
-                    let len_len = prost::length_delimiter_len(left_size);
-
-                    // Go to the end of the file to insert the new nodes
-                    let new_nodes_pos = f
-                        .seek(SeekFrom::End(0))
-                        .await
-                        .map_err(|e| Error::IoError(e))?;
-                    f.write_all(left.encode_length_delimited_to_vec().as_slice())
-                        .await
-                        .map_err(|e| Error::IoError(e))?;
-                    f.write_all(right.encode_length_delimited_to_vec().as_slice())
-                        .await
-                        .map_err(|e| Error::IoError(e))?;
-
-                    // Go back to the old node and overwrite it with the new nodes inserted
-                    insert_internal(&mut new_parent, Some(median), new_nodes_pos)?;
-                    insert_internal(
-                        &mut new_parent,
-                        None,
-                        (new_nodes_pos as usize + left_size + len_len) as u64,
-                    )?;
-
-                    f.seek(SeekFrom::Start(pos))
-                        .await
-                        .map_err(|e| Error::IoError(e))?;
-                    f.write_all(new_parent.encode_length_delimited_to_vec().as_slice())
-                        .await
-                        .map_err(|e| Error::IoError(e))?;
-
-                    return Ok(());
                 }
 
-                // An internal node has overflown. Need to split and then re-run insertion
-                let (candidate_parent_node, pos, mut f) =
-                    follow_node(f, 0, msg.0, SearchTarget::InternalNode).await?;
-
-                if let SearchResult::InternalNode(n) =
-                    candidate_parent_node.ok_or(Error::RecordNotFound)?
-                {
-                    // This shouldn't happen because it would indicate that there is a leaf node already there
-                    // even if the leaf node is full
-                    if len_internal_child_pointers(&n) > ORDER {
-                        return Err(Error::TraversalError);
-                    }
-
-                    // Split the internal node up and then re-run the insertion
-                    let left_vals = left_values_internal(&n);
-                    let right_vals = right_values_internal(&n);
-                    let median = median(Node::InternalNode(&n));
-
-                    let mut new_parent = create_internal_node();
-                    let mut left = create_internal_node();
-                    let mut right = create_internal_node();
-
-                    // Copy all nodes less than median into left node
-                    for (k, v) in left_vals {
-                        insert_internal(&mut left, Some(k), v)?;
-                    }
-
-                    for (k, v) in right_vals {
-                        insert_internal(&mut right, Some(k), v)?;
-                    }
-
-                    // Go to the end of the file to insert the new nodes
-                    let new_nodes_pos = f
-                        .seek(SeekFrom::End(0))
-                        .await
-                        .map_err(|e| Error::IoError(e))?;
-                    f.write_all(left.encode_length_delimited_to_vec().as_slice())
-                        .await
-                        .map_err(|e| Error::IoError(e))?;
-                    f.write_all(right.encode_length_delimited_to_vec().as_slice())
-                        .await
-                        .map_err(|e| Error::IoError(e))?;
-
-                    let parent_size = new_parent.encoded_len();
-                    let len_len = prost::length_delimiter_len(parent_size);
-
-                    // Go back to the old node and overwrite it with the new nodes inserted
-                    insert_internal(&mut new_parent, Some(median), new_nodes_pos)?;
-                    insert_internal(
-                        &mut new_parent,
-                        None,
-                        (new_nodes_pos as usize + len_len + parent_size) as u64,
-                    )?;
-
-                    f.seek(SeekFrom::Start(pos))
-                        .await
-                        .map_err(|e| Error::IoError(e))?;
-                    f.write_all(new_parent.encode_length_delimited_to_vec().as_slice())
-                        .await
-                        .map_err(|e| Error::IoError(e))?;
-                }
+                addr.send(msg).await.map_err(|e| Error::MailboxError(e))?
             }
-
-            addr.send(msg).await.map_err(|e| Error::MailboxError(e))?
-        })
+            .into_actor(self),
+        )
     }
 }
 
@@ -760,5 +773,58 @@ mod tests {
 
         assert_eq!(len_leaf_node_keys(&node), 2);
         assert_eq!(len_leaf_disk_pointers(&node), 2);
+    }
+
+    #[actix::test]
+    async fn test_insert_key() {
+        use tokio::fs::OpenOptions;
+
+        async fn insert_key() -> Option<()> {
+            let f = OpenOptions::new()
+                .read(true)
+                .write(true)
+                .create(true)
+                .open("/tmp/test.idx")
+                .await
+                .map_err(|e| Error::IoError(e))
+                .ok()?;
+
+            let tree_handle = TreeHandle {
+                handle: Arc::new(Mutex::new(f)),
+                seekers: Arc::new(Mutex::new(HashMap::new())),
+            }
+            .start();
+
+            tree_handle
+                .send(InsertKey(
+                    10,
+                    RecordId {
+                        page: 10,
+                        page_idx: 52,
+                    },
+                ))
+                .await
+                .ok()?
+                .ok()?;
+
+            // Insert another key
+            tree_handle
+                .send(InsertKey(
+                    11,
+                    RecordId {
+                        page: 10,
+                        page_idx: 52,
+                    },
+                ))
+                .await
+                .ok()?
+                .ok()?;
+
+            Some(())
+        }
+
+        let res = insert_key().await;
+        std::fs::remove_file("/tmp/test.idx").unwrap();
+        assert_eq!(res, Some(()));
     }
 }
