@@ -44,6 +44,7 @@ enum SearchTarget {
 }
 
 /// Specifies whether we are looking for values greater than or less than the key.
+#[derive(Debug, PartialEq)]
 enum SearchKey {
     Lt(u64),
     Gt(u64),
@@ -245,7 +246,7 @@ fn median(n: Node) -> u64 {
                 .keys_pointers
                 .iter()
                 .enumerate()
-                .filter(|(i, _)| i % 2 == 0)
+                .filter(|(i, _)| i % 2 != 0)
                 .map(|(_, x)| x.clone())
                 .collect::<Vec<u64>>();
             keys[keys.len() / 2]
@@ -279,7 +280,7 @@ fn left_values_internal(node: &BTreeInternalNode) -> Vec<(u64, u64)> {
     k_v
 }
 
-fn right_values_internal(node: &BTreeInternalNode) -> Vec<(u64, u64)> {
+fn right_values_internal(node: &BTreeInternalNode) -> Vec<(SearchKey, u64)> {
     let med = median(Node::InternalNode(node));
 
     let mut vals = Vec::new();
@@ -297,9 +298,18 @@ fn right_values_internal(node: &BTreeInternalNode) -> Vec<(u64, u64)> {
         vals.push((i, i - 1));
     }
 
-    for (k_i, v_i) in vals {
-        k_v.push((node.keys_pointers[k_i], node.keys_pointers[v_i]));
+    for (k_i, v_i) in &vals {
+        k_v.push((
+            SearchKey::Lt(node.keys_pointers[k_i.clone()]),
+            node.keys_pointers[v_i.clone()],
+        ));
     }
+
+    // Include last straggle node
+    k_v.push((
+        SearchKey::Gt(node.keys_pointers[vals[vals.len() - 1].0]),
+        node.keys_pointers[node.keys_pointers.len() - 1],
+    ));
 
     k_v
 }
@@ -730,7 +740,7 @@ impl Handler<InsertKey> for TreeHandle {
                         }
 
                         for (k, v) in right_vals {
-                            insert_internal(&mut right, SearchKey::Lt(k), v)?;
+                            insert_internal(&mut right, k, v)?;
                         }
 
                         // Go to the end of the file to insert the new nodes
@@ -983,6 +993,68 @@ mod tests {
 
     #[traced_test]
     #[test]
+    fn test_left_internal() {
+        // Create a node-key space that looks like:
+        // [pointer: (1, 1), key: 2, pointer: (3, 3), key: 4, pointer: (5, 5)]
+        tracing::info!("inserting 5 test values");
+
+        let mut node = create_internal_node();
+
+        insert_internal(&mut node, SearchKey::Lt(2), 1).unwrap();
+        insert_internal(&mut node, SearchKey::Lt(4), 3).unwrap();
+        insert_internal(&mut node, SearchKey::Lt(6), 5).unwrap();
+        insert_internal(&mut node, SearchKey::Lt(8), 7).unwrap();
+        insert_internal(&mut node, SearchKey::Gt(8), 9).unwrap();
+
+        let left = left_values_internal(&node);
+        assert_eq!(left.len(), 2);
+        assert_eq!(left[0], (2, 1));
+        assert_eq!(left[1], (4, 3));
+    }
+
+    #[traced_test]
+    #[test]
+    fn test_median_internal() {
+        // Create a node-key space that looks like:
+        // [pointer: (1, 1), key: 2, pointer: (3, 3), key: 4, pointer: (5, 5)]
+        tracing::info!("inserting 5 test values");
+
+        let mut node = create_internal_node();
+
+        insert_internal(&mut node, SearchKey::Lt(2), 1).unwrap();
+        insert_internal(&mut node, SearchKey::Lt(4), 3).unwrap();
+        insert_internal(&mut node, SearchKey::Lt(6), 5).unwrap();
+        insert_internal(&mut node, SearchKey::Lt(8), 7).unwrap();
+        insert_internal(&mut node, SearchKey::Gt(8), 9).unwrap();
+
+        let median = median(Node::InternalNode(&node));
+        assert_eq!(median, 6);
+    }
+
+    #[traced_test]
+    #[test]
+    fn test_right_internal() {
+        // Create a node-key space that looks like:
+        // [pointer: (1, 1), key: 2, pointer: (3, 3), key: 4, pointer: (5, 5)]
+        tracing::info!("inserting 5 test values");
+
+        let mut node = create_internal_node();
+
+        insert_internal(&mut node, SearchKey::Lt(2), 1).unwrap();
+        insert_internal(&mut node, SearchKey::Lt(4), 3).unwrap();
+        insert_internal(&mut node, SearchKey::Lt(6), 5).unwrap();
+        insert_internal(&mut node, SearchKey::Lt(8), 7).unwrap();
+        insert_internal(&mut node, SearchKey::Gt(8), 9).unwrap();
+
+        let right = right_values_internal(&node);
+        assert_eq!(right.len(), 3);
+        assert_eq!(right[0], (SearchKey::Lt(6), 5));
+        assert_eq!(right[1], (SearchKey::Lt(8), 7));
+        assert_eq!(right[2], (SearchKey::Gt(8), 9));
+    }
+
+    #[traced_test]
+    #[test]
     fn test_insert_leaf() {
         use rand::Rng;
 
@@ -1011,7 +1083,7 @@ mod tests {
         }
     }
 
-    /*#[traced_test]
+    #[traced_test]
     #[actix::test]
     async fn test_insert_key() {
         use rand::Rng;
@@ -1062,7 +1134,7 @@ mod tests {
         }
 
         let res = insert_key().await;
-        //std::fs::remove_file("/tmp/test.idx").unwrap();
+        std::fs::remove_file("/tmp/test.idx").unwrap();
         assert_eq!(res, Some(()));
-    }*/
+    }
 }
