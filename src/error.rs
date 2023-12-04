@@ -21,6 +21,12 @@ pub enum Error {
     InvalidKey,
 }
 
+impl From<IoError> for Error {
+    fn from(e: IoError) -> Self {
+        Self::IoError(e)
+    }
+}
+
 impl fmt::Display for Error {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
