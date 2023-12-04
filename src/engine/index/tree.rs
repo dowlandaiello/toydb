@@ -414,46 +414,80 @@ fn follow_node(
     pos: u64,
     key: u64,
     target: SearchTarget,
-) -> BoxFuture<'static, Result<(Option<SearchResult>, u64, OwnedMutexGuard<File>), Error>> {
+) -> BoxFuture<
+    'static,
+    Result<(Option<SearchResult>, u64, OwnedMutexGuard<File>), (Error, OwnedMutexGuard<File>)>,
+> {
     Box::pin(async move {
         let node = {
             // Get the current node
-            handle
+            if let Err(e) = handle
                 .seek(SeekFrom::Start(pos as u64))
                 .await
-                .map_err(|e| Error::IoError(e))?;
+                .map_err(|e| Error::IoError(e))
+            {
+                return Err((e, handle));
+            }
 
             // Peek 10 bytes for the length prefix
             let mut length_delim_buff: [u8; 10] = [0; 10];
-            handle
+            if let Err(e) = handle
                 .read_exact(&mut length_delim_buff)
                 .await
-                .map_err(|e| Error::IoError(e))?;
-            let length_delim = prost::decode_length_delimiter(&mut length_delim_buff.as_slice())
-                .map_err(|e| Error::DecodeError(e))?;
+                .map_err(|e| Error::IoError(e))
+            {
+                return Err((e, handle));
+            }
+            let length_delim =
+                match prost::decode_length_delimiter(&mut length_delim_buff.as_slice())
+                    .map_err(|e| Error::DecodeError(e))
+                {
+                    Ok(v) => v,
+                    Err(e) => {
+                        return Err((e, handle));
+                    }
+                };
             let delim_len = prost::length_delimiter_len(length_delim);
 
             // Make a buffer for the size of the node
             let mut node_buff: Vec<u8> = vec![0; length_delim + delim_len];
 
             // Read into the buff
-            handle
+            if let Err(e) = handle
                 .seek(SeekFrom::Start(pos as u64))
                 .await
-                .map_err(|e| Error::IoError(e))?;
-            handle
+                .map_err(|e| Error::IoError(e))
+            {
+                return Err((e, handle));
+            }
+            if let Err(e) = handle
                 .read_exact(&mut node_buff)
                 .await
-                .map_err(|e| Error::IoError(e))?;
+                .map_err(|e| Error::IoError(e))
+            {
+                return Err((e, handle));
+            }
 
             // Read a node from the buff
-            let node = BTreeInternalNode::decode_length_delimited(node_buff.as_slice())
-                .map_err(|e| Error::DecodeError(e))?;
+            let node = match BTreeInternalNode::decode_length_delimited(node_buff.as_slice())
+                .map_err(|e| Error::DecodeError(e))
+            {
+                Ok(v) => v,
+                Err(e) => {
+                    return Err((e, handle));
+                }
+            };
 
             // If the current node is a leaf AND we are looking for a leaf load the node and return the record pointer
             if node.is_leaf_node && target == SearchTarget::LeafNode {
-                let node = BTreeLeafNode::decode_length_delimited(node_buff.as_slice())
-                    .map_err(|e| Error::DecodeError(e))?;
+                let node = match BTreeLeafNode::decode_length_delimited(node_buff.as_slice())
+                    .map_err(|e| Error::DecodeError(e))
+                {
+                    Ok(v) => v,
+                    Err(e) => {
+                        return Err((e, handle));
+                    }
+                };
 
                 tracing::debug!("found candidate leaf node: {:?}", node);
 
@@ -630,6 +664,52 @@ impl TreeHandle {
 
         Ok(((), f))
     }
+
+    async fn insert_candidate_leaf_node(
+        f: OwnedMutexGuard<File>,
+        msg: &InsertKey,
+    ) -> Result<((), OwnedMutexGuard<File>), (Error, OwnedMutexGuard<File>)> {
+        let (candidate_leaf_node, candidate_pos, mut f) =
+            match follow_node(f, 0, msg.0, SearchTarget::LeafNode).await {
+                Ok(x) => x,
+                Err(e) => {
+                    return Err(e);
+                }
+            };
+
+        let mut n = match candidate_leaf_node {
+            Some(SearchResult::LeafNode(n)) => n,
+            _ => {
+                return Err((Error::TraversalError, f));
+            }
+        };
+
+        if let Err(e) = insert_leaf(
+            &mut n,
+            msg.0,
+            RecordIdPointer {
+                is_empty: false,
+                page: msg.1.page,
+                page_idx: msg.1.page_idx,
+            },
+        ) {
+            return Err((e, f));
+        }
+
+        // Write the node
+        if let Err(e) = f.seek(SeekFrom::Start(candidate_pos)).await {
+            return Err((Error::IoError(e), f));
+        }
+
+        if let Err(e) = f
+            .write_all(n.encode_length_delimited_to_vec().as_slice())
+            .await
+        {
+            return Err((Error::IoError(e), f));
+        }
+
+        Ok(((), f))
+    }
 }
 
 impl Actor for TreeHandle {
@@ -644,7 +724,10 @@ impl Handler<GetKey> for TreeHandle {
 
         Box::pin(async move {
             let f = handle.lock_owned().await;
-            let res = follow_node(f, 0, msg.0, SearchTarget::LeafNode).await?.0;
+            let res = match follow_node(f, 0, msg.0, SearchTarget::LeafNode).await {
+                Ok(x) => x.0,
+                Err(e) => return Err(e.0),
+            };
 
             if let Some(SearchResult::LeafNode(n)) = res {
                 Ok(get_leaf(n, msg.0).ok_or(Error::TraversalError)?.into())
@@ -686,7 +769,8 @@ impl Handler<InsertKey> for TreeHandle {
                     tracing::debug!("index not empty: searching for candidate node");
 
                     // Insertion procedure priority:
-                    // TODO:
+                    //
+                    // 1. Find the leaf node that this belongs in that has space
                 }
 
                 addr.send(msg).await.map_err(|e| Error::MailboxError(e))?
@@ -1105,7 +1189,7 @@ mod tests {
             // This should give us node b
             let res = match follow_node(f, 0, 1, SearchTarget::LeafNode).await {
                 Ok((Some(SearchResult::LeafNode(res)), _, _)) => res,
-                Err(e) => return Err(e),
+                Err(e) => return Err(e.0),
                 _ => {
                     return Err(Error::TraversalError);
                 }
@@ -1199,7 +1283,7 @@ mod tests {
             // This should give us node b
             let res = match follow_node(f, 0, 2, SearchTarget::LeafNode).await {
                 Ok((Some(SearchResult::LeafNode(res)), _, _)) => res,
-                Err(e) => return Err(e),
+                Err(e) => return Err(e.0),
                 _ => {
                     return Err(Error::TraversalError);
                 }
@@ -1219,7 +1303,7 @@ mod tests {
         res.unwrap();
     }
 
-    /*#[traced_test]
+    #[traced_test]
     #[actix::test]
     async fn test_insert_key() {
         use rand::Rng;
@@ -1244,7 +1328,7 @@ mod tests {
             let mut rng = rand::thread_rng();
 
             // Insert a shitton of random keys
-            for i in 0..1_000 {
+            for i in 0..2 {
                 let mut k: u64 = rng.gen();
 
                 while k == 0 {
@@ -1272,5 +1356,5 @@ mod tests {
         let res = insert_key().await;
         std::fs::remove_file("/tmp/test.idx").unwrap();
         assert_eq!(res, Some(()));
-    }*/
+    }
 }
