@@ -139,6 +139,19 @@ fn len_leaf_disk_pointers(node: &BTreeLeafNode) -> usize {
         .len()
 }
 
+fn pos_last_entry(node: &BTreeInternalNode) -> Option<usize> {
+    if len_internal_keys(&node) == 0 {
+        return Some(0);
+    }
+
+    node.keys_pointers
+        .iter()
+        .enumerate()
+        .filter(|(_, x)| **x != 0)
+        .map(|(i, _)| i)
+        .last()
+}
+
 /// Inserts the key and value into the btree node, if space exists.
 #[tracing::instrument]
 fn insert_internal(node: &mut BTreeInternalNode, k: SearchKey, v: u64) -> Result<(), Error> {
@@ -191,6 +204,8 @@ fn insert_internal(node: &mut BTreeInternalNode, k: SearchKey, v: u64) -> Result
             Ok(())
         }
         None => {
+            let pos_insert = pos_last_entry(&node).ok_or(Error::TraversalError)?;
+
             if len_keys < ORDER && len_children <= ORDER {
                 match k {
                     SearchKey::Lt(k) => {
@@ -200,28 +215,35 @@ fn insert_internal(node: &mut BTreeInternalNode, k: SearchKey, v: u64) -> Result
                             len_keys + len_children + 1
                         );
 
+                        if len_keys == 0 {
+                            node.keys_pointers[pos_insert] = v;
+                            node.keys_pointers[pos_insert + 1] = k;
+
+                            return Ok(());
+                        }
+
                         // Insert in Lt pos
-                        node.keys_pointers[len_keys + len_children + 1] = k;
-                        node.keys_pointers[len_keys + len_children] = v;
+                        node.keys_pointers[pos_insert + 2] = k;
+                        node.keys_pointers[pos_insert + 1] = v;
                     }
                     SearchKey::Gt(k) => {
                         tracing::debug!(
                             "inserting in GYATT position in {:?} at {}",
                             node,
-                            len_keys + len_children + 1
+                            pos_insert + 1
                         );
 
                         // Insert with a lt before if there are no keys
                         if len_keys == 0 {
-                            node.keys_pointers[len_keys + len_children + 1] = k;
-                            node.keys_pointers[len_keys + len_children + 2] = v;
+                            node.keys_pointers[pos_insert + 1] = k;
+                            node.keys_pointers[pos_insert + 2] = v;
 
                             return Ok(());
                         }
 
                         // Insert in gt pos
-                        node.keys_pointers[len_keys + len_children] = k;
-                        node.keys_pointers[len_keys + len_children + 1] = v;
+                        node.keys_pointers[pos_insert + 1] = k;
+                        node.keys_pointers[pos_insert + 2] = v;
                     }
                 }
 
@@ -430,10 +452,11 @@ fn follow_node(
 
             // If the current node is a leaf AND we are looking for a leaf load the node and return the record pointer
             if node.is_leaf_node && target == SearchTarget::LeafNode {
-                tracing::debug!("found candidate leaf node: {:?}", node);
-
                 let node = BTreeLeafNode::decode_length_delimited(node_buff.as_slice())
                     .map_err(|e| Error::DecodeError(e))?;
+
+                tracing::debug!("found candidate leaf node: {:?}", node);
+
                 return Ok((Some(SearchResult::LeafNode(node)), pos, handle));
             }
 
@@ -1012,116 +1035,187 @@ mod tests {
         assert_eq!(res, Some(()));
     }
 
+    // Create a few different trees:
+    // - One that has a root to a leaf node
+    // a
+    // |
+    // b
+    //
+    // - One that has a root to two leaf nodes, of which we are trying
+    // to find the right node
+    //   a
+    //  _|_
+    // |   |
+    // b   c
+    //
+    // - One that ha an intermediate internal node
+    // a
+    // |
+    // b
+    // |
+    // c
+
     #[traced_test]
     #[actix::test]
-    async fn test_follow_node() {
+    async fn test_follow_node_direct_descendant() {
         async fn test_follow_node() -> Result<(), Error> {
             use tokio::fs::OpenOptions;
 
-            // Create a few different trees:
-            // - One that has a root to a leaf node
-            // a
-            // |
-            // b
-            //
-            // - One that has a root to two leaf nodes, of which we are trying
-            // to find the right node
-            //   a
-            //  _|_
-            // |   |
-            // b   c
-            //
-            // - One that ha an intermediate internal node
-            // a
-            // |
-            // b
-            // |
-            // c
-            {
-                tracing::info!("testing follow_node with direct descendant");
+            tracing::info!("testing follow_node with direct descendant");
 
-                let f = OpenOptions::new()
-                    .read(true)
-                    .write(true)
-                    .create(true)
-                    .open("/tmp/test_follow_node_1.idx")
-                    .await
-                    .map_err(|e| Error::IoError(e))?;
-                let f = Arc::new(Mutex::new(f));
-                let mut f = f.lock_owned().await;
+            let f = OpenOptions::new()
+                .read(true)
+                .write(true)
+                .create(true)
+                .open("/tmp/test_follow_node_1.idx")
+                .await
+                .map_err(|e| Error::IoError(e))?;
+            let f = Arc::new(Mutex::new(f));
+            let mut f = f.lock_owned().await;
 
-                // Insert root node
-                let mut root = create_internal_node();
-                let root_len = root.encoded_len();
-                let root_len_len = prost::length_delimiter_len(root_len);
+            // Insert root node
+            let mut root = create_internal_node();
+            let root_len = root.encoded_len();
+            let root_len_len = prost::length_delimiter_len(root_len);
 
-                let total_root_len = root_len + root_len_len;
+            let total_root_len = root_len + root_len_len;
 
-                // Insert leaf
-                let mut b = create_leaf_node();
-                insert_leaf(
-                    &mut b,
-                    1,
-                    RecordIdPointer {
-                        is_empty: false,
-                        page: 1,
-                        page_idx: 2,
-                    },
-                )?;
+            // Insert leaf
+            let mut b = create_leaf_node();
+            insert_leaf(
+                &mut b,
+                1,
+                RecordIdPointer {
+                    is_empty: false,
+                    page: 1,
+                    page_idx: 2,
+                },
+            )?;
 
-                // Insert the leaf into the root node
-                tracing::info!("inserting leaf node into root node at position Gt(1)");
-                insert_internal(&mut root, SearchKey::Gt(1), total_root_len as u64)?;
+            // Insert the leaf into the root node
+            tracing::info!("inserting leaf node into root node at position Gt(1)");
+            insert_internal(&mut root, SearchKey::Gt(1), total_root_len as u64)?;
 
-                tracing::info!("writing root node and leaf node to disk");
-                f.write_all(root.encode_length_delimited_to_vec().as_slice())
-                    .await?;
-                f.write_all(b.encode_length_delimited_to_vec().as_slice())
-                    .await?;
+            tracing::info!("writing root node and leaf node to disk");
+            f.write_all(root.encode_length_delimited_to_vec().as_slice())
+                .await?;
+            f.write_all(b.encode_length_delimited_to_vec().as_slice())
+                .await?;
 
-                // This should give us node b
-                let res = match follow_node(f, 0, 1, SearchTarget::LeafNode).await {
-                    Ok((Some(SearchResult::LeafNode(res)), _, _)) => res,
-                    Err(e) => return Err(e),
-                    _ => {
-                        return Err(Error::TraversalError);
-                    }
-                };
+            // This should give us node b
+            let res = match follow_node(f, 0, 1, SearchTarget::LeafNode).await {
+                Ok((Some(SearchResult::LeafNode(res)), _, _)) => res,
+                Err(e) => return Err(e),
+                _ => {
+                    return Err(Error::TraversalError);
+                }
+            };
 
-                assert_eq!(res.is_leaf_node, true);
-                assert_eq!(res.keys[0], 1);
-                assert_eq!(res.disk_pointers[0].is_empty, false);
-                assert_eq!(res.disk_pointers[0].page, 1);
-                assert_eq!(res.disk_pointers[0].page_idx, 2);
-            }
-
-            /*{
-                let f = OpenOptions::new()
-                    .read(true)
-                    .write(true)
-                    .create(true)
-                    .open("/tmp/test_follow_node_2.idx")
-                    .await
-                    .map_err(|e| Error::IoError(e))?;
-            }
-
-            {
-                let f = OpenOptions::new()
-                    .read(true)
-                    .write(true)
-                    .create(true)
-                    .open("/tmp/test_follow_node_3.idx")
-                    .await
-                    .map_err(|e| Error::IoError(e))?;
-            }*/
+            assert_eq!(res.is_leaf_node, true);
+            assert_eq!(res.keys[0], 1);
+            assert_eq!(res.disk_pointers[0].is_empty, false);
+            assert_eq!(res.disk_pointers[0].page, 1);
+            assert_eq!(res.disk_pointers[0].page_idx, 2);
 
             Ok(())
         }
 
         let res = test_follow_node().await;
         std::fs::remove_file("/tmp/test_follow_node_1.idx").unwrap();
-        // std::fs::remove_file("/tmp/test_follow_node_2.idx").unwrap();
-        // std::fs::remove_file("/tmp/test_follow_node_3.idx").unwrap();
+        res.unwrap();
+    }
+
+    #[traced_test]
+    #[actix::test]
+    async fn test_follow_node_right_descendant() {
+        async fn test_follow_node() -> Result<(), Error> {
+            use tokio::fs::OpenOptions;
+
+            tracing::info!("testing follow_node with direct descendant");
+
+            let f = OpenOptions::new()
+                .read(true)
+                .write(true)
+                .create(true)
+                .open("/tmp/test_follow_node_2.idx")
+                .await
+                .map_err(|e| Error::IoError(e))?;
+            let f = Arc::new(Mutex::new(f));
+            let mut f = f.lock_owned().await;
+
+            // Insert root node
+            let mut root = create_internal_node();
+            let root_len = root.encoded_len();
+            let root_len_len = prost::length_delimiter_len(root_len);
+
+            let total_root_len = root_len + root_len_len;
+
+            // Insert leaf
+            let mut b = create_leaf_node();
+            insert_leaf(
+                &mut b,
+                1,
+                RecordIdPointer {
+                    is_empty: false,
+                    page: 1,
+                    page_idx: 2,
+                },
+            )?;
+            let leaf_len = b.encoded_len();
+            let leaf_len_len = prost::length_delimiter_len(leaf_len);
+
+            let total_leaf_len = leaf_len + leaf_len_len;
+
+            let mut c = create_leaf_node();
+            insert_leaf(
+                &mut c,
+                2,
+                RecordIdPointer {
+                    is_empty: false,
+                    page: 3,
+                    page_idx: 4,
+                },
+            )?;
+
+            // Insert the leaf into the root node
+            tracing::info!("inserting leaf node into root node at position Gt(1)");
+            insert_internal(&mut root, SearchKey::Gt(1), total_root_len as u64)?;
+
+            tracing::info!("inserting leaf node into root node at position Gt(2)");
+            insert_internal(
+                &mut root,
+                SearchKey::Gt(2),
+                total_leaf_len as u64 + total_root_len as u64,
+            )?;
+
+            tracing::info!("writing root node and leaf node to disk");
+            f.write_all(root.encode_length_delimited_to_vec().as_slice())
+                .await?;
+            f.write_all(b.encode_length_delimited_to_vec().as_slice())
+                .await?;
+            f.write_all(c.encode_length_delimited_to_vec().as_slice())
+                .await?;
+
+            // This should give us node b
+            let res = match follow_node(f, 0, 2, SearchTarget::LeafNode).await {
+                Ok((Some(SearchResult::LeafNode(res)), _, _)) => res,
+                Err(e) => return Err(e),
+                _ => {
+                    return Err(Error::TraversalError);
+                }
+            };
+
+            assert_eq!(res.is_leaf_node, true);
+            assert_eq!(res.keys[0], 2);
+            assert_eq!(res.disk_pointers[0].is_empty, false);
+            assert_eq!(res.disk_pointers[0].page, 3);
+            assert_eq!(res.disk_pointers[0].page_idx, 4);
+
+            Ok(())
+        }
+
+        let res = test_follow_node().await;
+        std::fs::remove_file("/tmp/test_follow_node_2.idx").unwrap();
         res.unwrap();
     }
 
