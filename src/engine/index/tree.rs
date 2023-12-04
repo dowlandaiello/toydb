@@ -140,6 +140,7 @@ fn len_leaf_disk_pointers(node: &BTreeLeafNode) -> usize {
 }
 
 /// Inserts the key and value into the btree node, if space exists.
+#[tracing::instrument]
 fn insert_internal(node: &mut BTreeInternalNode, k: SearchKey, v: u64) -> Result<(), Error> {
     if let SearchKey::Lt(0) = k {
         return Err(Error::InvalidKey);
@@ -183,6 +184,8 @@ fn insert_internal(node: &mut BTreeInternalNode, k: SearchKey, v: u64) -> Result
 
     match pos_insert {
         Some(pos_insert) => {
+            tracing::debug!("key already exists; inserting in position {}", pos_insert);
+
             node.keys_pointers[pos_insert] = v;
 
             Ok(())
@@ -191,11 +194,31 @@ fn insert_internal(node: &mut BTreeInternalNode, k: SearchKey, v: u64) -> Result
             if len_keys < ORDER && len_children <= ORDER {
                 match k {
                     SearchKey::Lt(k) => {
+                        tracing::debug!(
+                            "inserting in less than position in {:?} at {}",
+                            node,
+                            len_keys + len_children + 1
+                        );
+
                         // Insert in Lt pos
                         node.keys_pointers[len_keys + len_children + 1] = k;
                         node.keys_pointers[len_keys + len_children] = v;
                     }
                     SearchKey::Gt(k) => {
+                        tracing::debug!(
+                            "inserting in GYATT position in {:?} at {}",
+                            node,
+                            len_keys + len_children + 1
+                        );
+
+                        // Insert with a lt before if there are no keys
+                        if len_keys == 0 {
+                            node.keys_pointers[len_keys + len_children + 1] = k;
+                            node.keys_pointers[len_keys + len_children + 2] = v;
+
+                            return Ok(());
+                        }
+
                         // Insert in gt pos
                         node.keys_pointers[len_keys + len_children] = k;
                         node.keys_pointers[len_keys + len_children + 1] = v;
@@ -837,10 +860,10 @@ mod tests {
         // [pointer: (1, 1), key: 2, pointer: (3, 3), key: 4, pointer: (5, 5)]
         tracing::info!("inserting 5 test values");
 
-        insert_internal(&mut node, SearchKey::Lt(2), 1).unwrap();
+        insert_internal(&mut node, SearchKey::Gt(2), 3).unwrap();
         tracing::info!("wrote 1 test value");
 
-        insert_internal(&mut node, SearchKey::Gt(2), 3).unwrap();
+        insert_internal(&mut node, SearchKey::Lt(2), 1).unwrap();
         tracing::info!("wrote 2nd test value");
 
         insert_internal(&mut node, SearchKey::Gt(4), 5).unwrap();
