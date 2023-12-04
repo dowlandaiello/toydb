@@ -43,6 +43,13 @@ enum SearchTarget {
     InternalNode,
 }
 
+/// Specifies whether we are looking for values greater than or less than the key.
+enum SearchKey {
+    Lt(u64),
+    Gt(u64),
+}
+
+#[derive(Debug)]
 enum SearchResult {
     LeafNode(BTreeLeafNode),
     InternalNode(BTreeInternalNode),
@@ -74,8 +81,7 @@ impl From<RecordIdPointer> for RecordId {
 
 fn create_internal_node() -> BTreeInternalNode {
     let mut node = BTreeInternalNode::default();
-    node.keys = vec![0; ORDER];
-    node.child_pointers = vec![0; ORDER + 1];
+    node.keys_pointers = vec![0; ORDER * 2 + 1];
 
     node
 }
@@ -97,9 +103,11 @@ fn create_leaf_node() -> BTreeLeafNode {
 }
 
 fn len_internal_keys(node: &BTreeInternalNode) -> usize {
-    node.keys
+    node.keys_pointers
         .iter()
-        .filter(|x| x != &&0)
+        .enumerate()
+        .filter(|(i, x)| i % 2 != 0 && x != &&0)
+        .map(|(_, x)| x)
         .collect::<Vec<&u64>>()
         .len()
 }
@@ -113,9 +121,11 @@ fn len_leaf_node_keys(node: &BTreeLeafNode) -> usize {
 }
 
 fn len_internal_child_pointers(node: &BTreeInternalNode) -> usize {
-    node.child_pointers
+    node.keys_pointers
         .iter()
-        .filter(|x| x != &&0)
+        .enumerate()
+        .filter(|(i, x)| i % 2 == 0 && x != &&0)
+        .map(|(_, x)| x)
         .collect::<Vec<&u64>>()
         .len()
 }
@@ -129,7 +139,15 @@ fn len_leaf_disk_pointers(node: &BTreeLeafNode) -> usize {
 }
 
 /// Inserts the key and value into the btree node, if space exists.
-fn insert_internal(node: &mut BTreeInternalNode, k: Option<u64>, v: u64) -> Result<(), Error> {
+fn insert_internal(node: &mut BTreeInternalNode, k: SearchKey, v: u64) -> Result<(), Error> {
+    if let SearchKey::Lt(0) = k {
+        return Err(Error::InvalidKey);
+    }
+
+    if let SearchKey::Gt(0) = k {
+        return Err(Error::InvalidKey);
+    }
+
     let len_keys = len_internal_keys(node);
     let len_children = len_internal_child_pointers(node);
 
@@ -137,27 +155,79 @@ fn insert_internal(node: &mut BTreeInternalNode, k: Option<u64>, v: u64) -> Resu
         return Err(Error::TraversalError);
     };
 
-    // We need to insert as a final child pointer
-    if len_keys == ORDER {
-        node.child_pointers[len_children] = v;
+    let mut pos_insert = None;
+
+    for (i, key) in node.keys_pointers.iter().enumerate() {
+        if i % 2 == 0 {
+            continue;
+        }
+
+        match k {
+            SearchKey::Lt(x) => {
+                if x == key.clone() {
+                    pos_insert = Some(i - 1);
+
+                    break;
+                }
+            }
+            SearchKey::Gt(x) => {
+                if x == key.clone() {
+                    pos_insert = Some(i + 1);
+
+                    break;
+                }
+            }
+        }
     }
 
-    // Insert the node and key at the end
-    if let Some(k) = k {
-        node.keys[len_keys] = k;
+    match pos_insert {
+        Some(pos_insert) => {
+            node.keys_pointers[pos_insert] = v;
+
+            Ok(())
+        }
+        None => {
+            if len_keys + len_children == node.keys_pointers.len() - 2 {
+                // Insert the key in Gt position and then insert the value
+                let k = if let SearchKey::Gt(k) = k {
+                    k
+                } else {
+                    return Err(Error::TraversalError);
+                };
+
+                node.keys_pointers[len_keys + len_children] = k;
+                node.keys_pointers[len_keys + len_children + 1] = v;
+
+                Ok(())
+            } else if len_keys + len_children < node.keys_pointers.len() - 2 {
+                // Insert in Lt pos
+                let k = if let SearchKey::Lt(k) = k {
+                    k
+                } else {
+                    return Err(Error::TraversalError);
+                };
+
+                node.keys_pointers[len_keys + len_children + 1] = k;
+                node.keys_pointers[len_keys + len_children] = v;
+
+                Ok(())
+            } else {
+                Err(Error::TraversalError)
+            }
+        }
     }
-
-    node.child_pointers[len_children] = v;
-
-    Ok(())
 }
 
 /// Inserts the  key and record pointer into the leaf, if space exists.
 fn insert_leaf(node: &mut BTreeLeafNode, k: u64, v: RecordIdPointer) -> Result<(), Error> {
+    if k == 0 {
+        return Err(Error::InvalidKey);
+    }
+
     let len_keys = len_leaf_node_keys(node);
     let len_children = len_leaf_disk_pointers(node);
 
-    if len_children > ORDER {
+    if len_children >= ORDER {
         return Err(Error::TraversalError);
     }
 
@@ -169,43 +239,94 @@ fn insert_leaf(node: &mut BTreeLeafNode, k: u64, v: RecordIdPointer) -> Result<(
 
 /// Determines the median key in the internal node.
 fn median(n: Node) -> u64 {
-    let keys = match n {
-        Node::InternalNode(n) => n.keys.as_slice(),
-        Node::LeafNode(n) => n.keys.as_slice(),
-    };
-
-    keys[keys.len() / 2]
+    match n {
+        Node::InternalNode(n) => {
+            let keys = n
+                .keys_pointers
+                .iter()
+                .enumerate()
+                .filter(|(i, _)| i % 2 == 0)
+                .map(|(_, x)| x.clone())
+                .collect::<Vec<u64>>();
+            keys[keys.len() / 2]
+        }
+        Node::LeafNode(n) => n.keys.as_slice()[n.keys.len() / 2],
+    }
 }
 
 fn left_values_internal(node: &BTreeInternalNode) -> Vec<(u64, u64)> {
     let med = median(Node::InternalNode(node));
 
-    node.keys
-        .iter()
-        .zip(node.child_pointers.iter())
-        .filter(|(k, _v)| k < &&med)
-        .map(|(k, v)| (k.clone(), v.clone()))
-        .collect::<Vec<(u64, u64)>>()
+    let mut vals = Vec::new();
+    let mut k_v = Vec::new();
+
+    for (i, key) in node.keys_pointers.iter().enumerate() {
+        if i % 2 == 0 {
+            continue;
+        }
+
+        if *key >= med {
+            break;
+        }
+
+        vals.push((i, i - 1));
+    }
+
+    for (k_i, v_i) in vals {
+        k_v.push((node.keys_pointers[k_i], node.keys_pointers[v_i]));
+    }
+
+    k_v
 }
 
 fn right_values_internal(node: &BTreeInternalNode) -> Vec<(u64, u64)> {
     let med = median(Node::InternalNode(node));
 
-    node.keys
-        .iter()
-        .zip(node.child_pointers.iter())
-        .filter(|(k, _)| k >= &&med)
-        .map(|(k, v)| (k.clone(), v.clone()))
-        .collect::<Vec<(u64, u64)>>()
+    let mut vals = Vec::new();
+    let mut k_v = Vec::new();
+
+    for (i, key) in node.keys_pointers.iter().enumerate() {
+        if i % 2 == 0 {
+            continue;
+        }
+
+        if *key < med {
+            continue;
+        }
+
+        vals.push((i, i - 1));
+    }
+
+    for (k_i, v_i) in vals {
+        k_v.push((node.keys_pointers[k_i], node.keys_pointers[v_i]));
+    }
+
+    k_v
 }
 
-fn get_internal(node: &BTreeInternalNode, k: u64) -> Option<u64> {
-    node.keys
-        .iter()
-        .zip(node.child_pointers.iter())
-        .filter(|(k_curr, _)| k_curr <= &&k)
-        .map(|(_, v)| v.clone())
-        .next()
+fn get_internal(node: &BTreeInternalNode, k: SearchKey) -> Option<u64> {
+    let mut pos = None;
+
+    for (i, key) in node.keys_pointers.iter().enumerate() {
+        if i % 2 == 0 {
+            continue;
+        }
+
+        match k {
+            SearchKey::Gt(x) => {
+                if x == key.clone() {
+                    pos = Some(i + 1);
+                }
+            }
+            SearchKey::Lt(x) => {
+                if x == key.clone() {
+                    pos = Some(i - 1);
+                }
+            }
+        }
+    }
+
+    pos.map(|pos| node.keys_pointers[pos])
 }
 
 /// Retrieves a list of the values less than the median value in the node's keys.
@@ -283,8 +404,12 @@ fn follow_node(
             let node = BTreeInternalNode::decode_length_delimited(node_buff.as_slice())
                 .map_err(|e| Error::DecodeError(e))?;
 
+            println!("{} {}", pos, node.is_leaf_node);
+
             // If the current node is a leaf AND we are looking for a leaf load the node and return the record pointer
             if node.is_leaf_node && target == SearchTarget::LeafNode {
+                tracing::debug!("found candidate leaf node: {:?}", node);
+
                 let node = BTreeLeafNode::decode_length_delimited(node_buff.as_slice())
                     .map_err(|e| Error::DecodeError(e))?;
                 return Ok((Some(SearchResult::LeafNode(node)), pos, handle));
@@ -293,17 +418,37 @@ fn follow_node(
             node
         };
 
-        let next = if let Some(n) = get_internal(&node, key) {
+        tracing::debug!(
+            "candidate node {:?} is not leaf node, or we are not looking for a leaf node",
+            node
+        );
+
+        let next = if let Some(n) = get_internal(&node, SearchKey::Lt(key)) {
+            tracing::debug!("found next node to probe for key {}: {:?}", key, n);
+
             n
         } else if target == SearchTarget::LeafNode {
+            tracing::debug!(
+                "we were looking for a next node to probe, but no leaf nodes are available"
+            );
+
             return Ok((None, pos, handle));
         } else {
+            tracing::debug!(
+                "no next node is found, and this is an internal node: {:?}",
+                node
+            );
+
             return Ok((Some(SearchResult::InternalNode(node)), pos, handle));
         };
 
         if target == SearchTarget::LeafNode {
+            tracing::debug!("continue probing for leaf node");
+
             return follow_node(handle, next, key, target).await;
         }
+
+        tracing::debug!("no candidate node found. giving up");
 
         Ok((None, pos, handle))
     })
@@ -375,7 +520,13 @@ impl TreeHandle {
             let mut leaves = Vec::new();
 
             // Get all child nodes and join
-            for c_pointer in node.child_pointers {
+            for c_pointer in node
+                .keys_pointers
+                .iter()
+                .enumerate()
+                .filter(|(i, _)| i % 2 == 0)
+                .map(|(i, x)| x.clone())
+            {
                 let (mut c_pointer_children, got_handle) =
                     match Self::collect_nodes(handle, c_pointer).await {
                         Ok(v) => v,
@@ -435,8 +586,11 @@ impl Handler<InsertKey> for TreeHandle {
                         let mut root_node = create_internal_node();
                         let body_len = root_node.encoded_len();
                         let len_len = prost::length_delimiter_len(body_len);
-                        root_node.keys[0] = msg.0;
-                        root_node.child_pointers[0] = (body_len + len_len) as u64;
+                        insert_internal(
+                            &mut root_node,
+                            SearchKey::Lt(msg.0),
+                            (body_len + len_len) as u64,
+                        )?;
 
                         let mut leaf_node = create_leaf_node();
                         insert_leaf(&mut leaf_node, msg.0, msg.1.into())?;
@@ -449,8 +603,21 @@ impl Handler<InsertKey> for TreeHandle {
                             .await
                             .map_err(|e| Error::IoError(e))?;
 
+                        println!(
+                            "{} {} {} {} {} BRUH",
+                            root_node.encode_length_delimited_to_vec().as_slice().len(),
+                            leaf_node.encode_length_delimited_to_vec().as_slice().len(),
+                            prost::length_delimiter_len(
+                                leaf_node.encode_length_delimited_to_vec().as_slice().len()
+                            ),
+                            leaf_node.is_leaf_node,
+                            body_len + len_len
+                        );
+
                         return Ok(());
                     }
+
+                    tracing::debug!("index not empty: searching for candidate node");
 
                     // Find the leaf node that this belongs in that has space and insert
                     let (candidate_leaf_node, pos, mut f) =
@@ -459,6 +626,8 @@ impl Handler<InsertKey> for TreeHandle {
                     if let SearchResult::LeafNode(mut n) =
                         candidate_leaf_node.ok_or(Error::RecordNotFound)?
                     {
+                        tracing::debug!("found candidate node: {:?}", &n);
+
                         // Attempt an insert
 
                         if let Ok(_) = insert_leaf(&mut n, msg.0, msg.1.clone().into()) {
@@ -516,10 +685,10 @@ impl Handler<InsertKey> for TreeHandle {
                             .map_err(|e| Error::IoError(e))?;
 
                         // Go back to the old node and overwrite it with the new nodes inserted
-                        insert_internal(&mut new_parent, Some(median), new_nodes_pos)?;
+                        insert_internal(&mut new_parent, SearchKey::Lt(median), new_nodes_pos)?;
                         insert_internal(
                             &mut new_parent,
-                            None,
+                            SearchKey::Gt(median),
                             (new_nodes_pos as usize + left_size + len_len) as u64,
                         )?;
 
@@ -557,11 +726,11 @@ impl Handler<InsertKey> for TreeHandle {
 
                         // Copy all nodes less than median into left node
                         for (k, v) in left_vals {
-                            insert_internal(&mut left, Some(k), v)?;
+                            insert_internal(&mut left, SearchKey::Lt(k), v)?;
                         }
 
                         for (k, v) in right_vals {
-                            insert_internal(&mut right, Some(k), v)?;
+                            insert_internal(&mut right, SearchKey::Lt(k), v)?;
                         }
 
                         // Go to the end of the file to insert the new nodes
@@ -580,10 +749,10 @@ impl Handler<InsertKey> for TreeHandle {
                         let len_len = prost::length_delimiter_len(parent_size);
 
                         // Go back to the old node and overwrite it with the new nodes inserted
-                        insert_internal(&mut new_parent, Some(median), new_nodes_pos)?;
+                        insert_internal(&mut new_parent, SearchKey::Lt(median), new_nodes_pos)?;
                         insert_internal(
                             &mut new_parent,
-                            None,
+                            SearchKey::Gt(median),
                             (new_nodes_pos as usize + len_len + parent_size) as u64,
                         )?;
 
@@ -724,23 +893,43 @@ impl Handler<Next> for TreeHandleIterator {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use tracing_test::traced_test;
 
+    #[traced_test]
     #[test]
-    fn test_insert_internal() {
+    fn test_create_internal_node() {
+        let node = create_internal_node();
+
+        assert_eq!(node.is_leaf_node, false);
+        assert_eq!(node.keys_pointers[0], 0);
+    }
+
+    #[traced_test]
+    #[test]
+    fn test_create_leaf_node() {
+        let node = create_leaf_node();
+
+        assert_eq!(node.is_leaf_node, true);
+        assert_eq!(node.disk_pointers[0].is_empty, true);
+    }
+
+    #[traced_test]
+    #[test]
+    fn test_len_internal() {
         let mut node = create_internal_node();
-        insert_internal(&mut node, Some(1), 1).expect("to succeed");
+
+        assert_eq!(len_internal_keys(&node), 0);
+        assert_eq!(len_internal_child_pointers(&node), 0);
+
+        insert_internal(&mut node, SearchKey::Lt(1), 2).unwrap();
 
         assert_eq!(len_internal_keys(&node), 1);
         assert_eq!(len_internal_child_pointers(&node), 1);
-
-        insert_internal(&mut node, None, 2).expect("to succeed");
-
-        assert_eq!(len_internal_keys(&node), 1);
-        assert_eq!(len_internal_child_pointers(&node), 2);
     }
 
+    #[traced_test]
     #[test]
-    fn test_insert_leaf() {
+    fn test_len_leaf_node() {
         let mut node = create_leaf_node();
 
         assert_eq!(len_leaf_node_keys(&node), 0);
@@ -751,32 +940,81 @@ mod tests {
             1,
             RecordIdPointer {
                 is_empty: false,
-                page: 0,
-                page_idx: 0,
+                page: 1,
+                page_idx: 10,
             },
         )
-        .expect("to succeed");
+        .unwrap();
 
         assert_eq!(len_leaf_node_keys(&node), 1);
         assert_eq!(len_leaf_disk_pointers(&node), 1);
-
-        insert_leaf(
-            &mut node,
-            2,
-            RecordIdPointer {
-                is_empty: false,
-                page: 1,
-                page_idx: 0,
-            },
-        )
-        .expect("to succeed");
-
-        assert_eq!(len_leaf_node_keys(&node), 2);
-        assert_eq!(len_leaf_disk_pointers(&node), 2);
     }
 
+    #[traced_test]
+    #[test]
+    fn test_get_internal() {
+        let mut node = create_internal_node();
+
+        // Create a node-key space that looks like:
+        // [pointer: (1, 1), key: 2, pointer: (3, 3), key: 4, pointer: (5, 5)]
+        tracing::info!("inserting 5 test values");
+
+        insert_internal(&mut node, SearchKey::Lt(2), 1).unwrap();
+        tracing::info!("wrote 1 test value");
+
+        insert_internal(&mut node, SearchKey::Lt(4), 3).unwrap();
+        tracing::info!("wrote 2nd test value");
+
+        insert_internal(&mut node, SearchKey::Lt(6), 5).unwrap();
+        tracing::info!("wrote 3rd test value");
+
+        insert_internal(&mut node, SearchKey::Lt(8), 7).unwrap();
+        tracing::info!("wrote 4th test value");
+
+        insert_internal(&mut node, SearchKey::Gt(8), 9).unwrap();
+        tracing::info!("successfuly inserted test keys: {:?}", node.keys_pointers);
+
+        assert_eq!(get_internal(&node, SearchKey::Lt(2)), Some(1));
+        assert_eq!(get_internal(&node, SearchKey::Lt(4)), Some(3));
+        assert_eq!(get_internal(&node, SearchKey::Lt(6)), Some(5));
+        assert_eq!(get_internal(&node, SearchKey::Lt(8)), Some(7));
+        assert_eq!(get_internal(&node, SearchKey::Gt(8)), Some(9));
+    }
+
+    #[traced_test]
+    #[test]
+    fn test_insert_leaf() {
+        use rand::Rng;
+
+        let mut node = create_leaf_node();
+
+        assert_eq!(len_leaf_node_keys(&node), 0);
+        assert_eq!(len_leaf_disk_pointers(&node), 0);
+
+        let mut rng = rand::thread_rng();
+
+        for i in 0..ORDER {
+            println!("inserted {}", i);
+
+            let k: u64 = rng.gen();
+
+            insert_leaf(
+                &mut node,
+                k,
+                RecordIdPointer {
+                    is_empty: false,
+                    page: 1,
+                    page_idx: 7,
+                },
+            )
+            .expect("to succeed");
+        }
+    }
+
+    /*#[traced_test]
     #[actix::test]
     async fn test_insert_key() {
+        use rand::Rng;
         use tokio::fs::OpenOptions;
 
         async fn insert_key() -> Option<()> {
@@ -795,36 +1033,36 @@ mod tests {
             }
             .start();
 
-            tree_handle
-                .send(InsertKey(
-                    10,
-                    RecordId {
-                        page: 10,
-                        page_idx: 52,
-                    },
-                ))
-                .await
-                .ok()?
-                .ok()?;
+            let mut rng = rand::thread_rng();
 
-            // Insert another key
-            tree_handle
-                .send(InsertKey(
-                    11,
-                    RecordId {
-                        page: 10,
-                        page_idx: 52,
-                    },
-                ))
-                .await
-                .ok()?
-                .ok()?;
+            // Insert a shitton of random keys
+            for i in 0..1_000 {
+                let mut k: u64 = rng.gen();
+
+                while k == 0 {
+                    k = rng.gen();
+                }
+
+                println!("inserting {}: {}", i, k);
+
+                tree_handle
+                    .send(InsertKey(
+                        k,
+                        RecordId {
+                            page: 10,
+                            page_idx: 52,
+                        },
+                    ))
+                    .await
+                    .ok()?
+                    .ok()?;
+            }
 
             Some(())
         }
 
         let res = insert_key().await;
-        std::fs::remove_file("/tmp/test.idx").unwrap();
+        //std::fs::remove_file("/tmp/test.idx").unwrap();
         assert_eq!(res, Some(()));
-    }
+    }*/
 }

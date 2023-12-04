@@ -18,6 +18,7 @@ pub enum Error {
     DecodeError(DecodeError),
     EncodeError(EncodeError),
     MiscDecodeError,
+    InvalidKey,
 }
 
 impl fmt::Display for Error {
@@ -38,6 +39,7 @@ impl fmt::Display for Error {
             Self::DecodeError(e) => write!(f, "failed to decode a message with protobuf: {:?}", e),
             Self::EncodeError(e) => write!(f, "failed to encode a message with protobuf: {:?}", e),
             Self::MiscDecodeError => write!(f, "failed to parse the message"),
+            Self::InvalidKey => write!(f, "the value is not a valid key value"),
         }
     }
 }
@@ -55,7 +57,8 @@ impl StdError for Error {
             | Self::ConversionError
             | Self::RecordNotFound
             | Self::TraversalError
-            | Self::MiscDecodeError => None,
+            | Self::MiscDecodeError
+            | Self::InvalidKey => None,
         }
     }
 }
@@ -74,6 +77,7 @@ impl ErrorLike for Error {
             Self::DecodeError(_) => 8,
             Self::EncodeError(_) => 9,
             Self::MiscDecodeError => 10,
+            Self::InvalidKey => 11,
         }
     }
 }

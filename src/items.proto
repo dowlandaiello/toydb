@@ -15,8 +15,7 @@ message RecordIdPointer {
 
 message BTreeInternalNode {
 	bool is_leaf_node = 1;
-	repeated uint64 keys = 2 [packed = true];
-	repeated uint64 child_pointers = 3 [packed = true];
+	repeated uint64 keys_pointers = 2 [packed = true];
 }
 
 message BTreeLeafNode {
