@@ -2,13 +2,17 @@ use super::{
     super::{
         error::Error,
         items::{Record, RecordId, Tuple},
+        types::db::DbName,
     },
     buffer_pool::{DbHandle, LoadHead, LoadPage, NewPage, WritePage, PAGE_SIZE},
     iterator::Next,
 };
-use actix::{Actor, Addr, AsyncContext, Context, Handler, Message, ResponseFuture};
+use actix::{
+    Actor, ActorTryFutureExt, Addr, AsyncContext, Context, Handler, Message, ResponseActFuture,
+    ResponseFuture, WrapFuture,
+};
 use prost::Message as ProstMessage;
-use std::{future, sync::Arc};
+use std::{collections::HashMap, future, sync::Arc};
 use tokio::sync::Mutex;
 
 /// Inserts a record at the end of the heap file.
@@ -17,14 +21,51 @@ use tokio::sync::Mutex;
 pub struct InsertRecord(pub Record);
 
 /// Loads a record from the heap file.
-#[derive(Message)]
+#[derive(Message, Debug)]
 #[rtype(result = "Result<Record, Error>")]
 pub struct LoadRecord(RecordId);
+
+/// Gets a heap handle for the database.
+#[derive(Message, Debug)]
+#[rtype(result = "Result<Addr<HeapHandle>, Error>")]
+pub struct GetHeap(pub DbName, Addr<DbHandle>);
 
 /// A message sent to a heaphandle that generates a new iterator.
 #[derive(Message)]
 #[rtype(result = "Addr<HeapHandleIterator>")]
 pub struct Iter;
+
+#[derive(Default, Debug)]
+pub struct HeapPool {
+    heaps: HashMap<DbName, Addr<HeapHandle>>,
+}
+
+impl Actor for HeapPool {
+    type Context = Context<Self>;
+}
+
+impl Handler<GetHeap> for HeapPool {
+    type Result = ResponseActFuture<Self, Result<Addr<HeapHandle>, Error>>;
+
+    #[tracing::instrument]
+    fn handle(&mut self, msg: GetHeap, _ctx: &mut Context<Self>) -> Self::Result {
+        tracing::info!("requesting heap from heap pool");
+
+        if let Some(handle) = self.heaps.get(&msg.0) {
+            return Box::pin(future::ready(Ok(handle.clone())).into_actor(self));
+        }
+
+        Box::pin(
+            async move { Ok(HeapHandle { buffer: msg.1 }.start()) }
+                .into_actor(self)
+                .map_ok(|addr, slf, _ctx| {
+                    slf.heaps.insert(msg.0, addr);
+
+                    addr
+                }),
+        )
+    }
+}
 
 /// An open heap abstraction.
 /// Allows:

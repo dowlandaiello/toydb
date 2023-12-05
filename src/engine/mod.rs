@@ -1,13 +1,16 @@
 use super::{
     error::Error,
-    items::Tuple,
+    items::{Element, Tuple},
     types::table::{self, CatalogueEntry, Ty},
     util::fs,
 };
 use buffer_pool::{BufferPool, DbHandle, GetBuffer};
 use catalogue::{Catalogue, InsertEntry};
-use cmd::ddl::{CreateDatabase, CreateTable};
-use heap::HeapHandle;
+use cmd::{
+    ddl::{CreateDatabase, CreateTable},
+    dml::Insert,
+};
+use heap::{HeapHandle, HeapPool};
 use index::{GetIndex, IndexPool};
 
 use actix::{Actor, Addr, Context, Handler, ResponseActFuture, ResponseFuture, WrapFuture};
@@ -24,6 +27,7 @@ pub mod iterator;
 #[derive(Debug)]
 pub struct Engine {
     buffer_pool: Addr<BufferPool>,
+    heap_pool: Addr<HeapPool>,
     index_pool: Addr<IndexPool>,
     catalogue: Addr<Catalogue>,
 }
@@ -48,6 +52,9 @@ impl Engine {
 
         tracing::info!("spawning buffer pool");
         let buffer_pool = BufferPool::start_default();
+
+        tracing::info!("spawning heap pool");
+        let heap_pool = HeapPool::start_default();
 
         tracing::info!("spawning index pool");
         let index_pool = IndexPool::start_default();
@@ -113,6 +120,7 @@ impl Engine {
 
         Ok(Self {
             buffer_pool,
+            heap_pool,
             index_pool,
             catalogue,
         }
@@ -138,6 +146,7 @@ impl Handler<CreateTable> for Engine {
             constraints,
         } = msg;
         let catalogue = self.catalogue.clone();
+        let index_pool = self.index_pool.clone();
 
         Box::pin(
             async move {
@@ -171,6 +180,14 @@ impl Handler<CreateTable> for Engine {
                     })
                 });
 
+                // Get an index for the primary key
+                if let Some(pks) = pks {
+                    let _ = index_pool
+                        .send(GetIndex(pks.join("-")))
+                        .await
+                        .map_err(|e| Error::MailboxError(e))?;
+                }
+
                 // Write all rel_name descriptor tuples
                 for ent in entries {
                     catalogue
@@ -179,6 +196,36 @@ impl Handler<CreateTable> for Engine {
                         .map_err(|e| Error::MailboxError(e))??;
                 }
 
+                Ok(())
+            }
+            .into_actor(self),
+        )
+    }
+}
+
+impl Handler<Insert> for Engine {
+    type Result = ResponseActFuture<Self, Result<(), Error>>;
+
+    #[tracing::instrument]
+    fn handle(&mut self, msg: Insert, _ctx: &mut Context<Self>) -> Self::Result {
+        let tuple = Tuple {
+            elements: msg
+                .values
+                .into_iter()
+                .map(|elem| Element { data: elem })
+                .collect::<Vec<Element>>(),
+        };
+
+        tracing::info!(
+            "inserting tuple {:?} into table {} in database {}",
+            tuple,
+            msg.table_name,
+            msg.db_name
+        );
+
+        Box::pin(
+            async move {
+                // Get the heap handle for the file
                 Ok(())
             }
             .into_actor(self),

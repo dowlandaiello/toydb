@@ -1,11 +1,14 @@
-use super::super::super::types::{
-    db::DbName,
-    table::{TableName, Ty},
+use super::super::super::{
+    error::Error,
+    types::{db::DbName, table::TableName},
 };
+use actix::Message;
 
-/// A message issued to the engine requesting that a tuple be inserted into the database.
-pub struct Insert(
-    pub(crate) DbName,
-    pub(crate) TableName,
-    pub(crate) Vec<(Vec<u8>, Ty)>,
-);
+/// A message issued to the engine requesting that a tuple be inserted into the table.
+#[derive(Message, Debug)]
+#[rtype(result = "Result<(), Error>")]
+pub struct Insert {
+    pub(crate) db_name: DbName,
+    pub(crate) table_name: TableName,
+    pub(crate) values: Vec<Vec<u8>>,
+}
