@@ -1593,7 +1593,7 @@ mod tests {
             let mut rng = rand::thread_rng();
 
             // Insert a shitton of random keys
-            for i in 0..5 {
+            for i in 0..1000 {
                 let mut k: u64 = rng.gen();
 
                 while k == 0 {

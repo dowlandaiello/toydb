@@ -3,7 +3,7 @@ use super::super::{
         error::Error,
         types::{
             db::DbName,
-            table::{TableName, Ty},
+            table::{Constraint, TableName, Ty},
         },
     },
     DbHandle,
@@ -20,8 +20,9 @@ pub struct CreateDatabase(pub(crate) DbName);
 /// a database. Returns an error if the operation failed.
 #[derive(Message, Debug)]
 #[rtype(result = "Result<(), Error>")]
-pub struct CreateTable(
-    pub(crate) DbName,
-    pub(crate) TableName,
-    pub(crate) Vec<(String, Ty)>,
-);
+pub struct CreateTable {
+    pub(crate) db_name: DbName,
+    pub(crate) table_name: TableName,
+    pub(crate) columns: Vec<(String, Ty)>,
+    pub(crate) constraints: Vec<Constraint>,
+}

@@ -28,6 +28,13 @@ pub fn index_file_path_with_name(name: impl Display) -> Result<PathBuf, Error> {
     path_in_data_dir(format!("{}.idx", name))
 }
 
+pub fn index_file_path_with_name_attr(
+    name: impl Display,
+    attr: impl Display,
+) -> Result<PathBuf, Error> {
+    path_in_data_dir(format!("{}_{}.idx", name, attr))
+}
+
 /// Checks whether or not the file is empty.
 pub async fn file_is_empty(f: &File) -> bool {
     f.metadata()

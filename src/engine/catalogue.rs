@@ -32,18 +32,26 @@ impl Handler<InsertEntry> for Catalogue {
 
     #[tracing::instrument]
     fn handle(&mut self, msg: InsertEntry, _ctx: &mut Context<Self>) -> Self::Result {
+        tracing::debug!("inserting catalogue entry {:?}", msg);
+
         let db_handle = self.db_handle.clone();
         let index_db_rel_name_handle = self.index_db_rel_name_handle.clone();
 
         Box::pin(
             async move {
                 // For inserting into the index
-                let k = rid::key_for_rel_db(msg.0.file_name.as_str(), msg.0.table_name.as_str());
+                let k = rid::key_for_rel_db(msg.0.attr_name.as_str(), msg.0.table_name.as_str());
 
                 let tuple: Tuple = msg.0.into();
                 let enc = tuple.encode_length_delimited_to_vec();
 
                 // Add the entry to the page
+                tracing::debug!(
+                    "inserting tuple {:?}: {:?} into catalogue at key {}",
+                    tuple,
+                    enc,
+                    k
+                );
                 tracing::info!("inserting entry into data file");
                 let rid = db_handle
                     .send(InsertRecord(Record {
@@ -58,7 +66,11 @@ impl Handler<InsertEntry> for Catalogue {
                 index_db_rel_name_handle
                     .send(InsertKey(k, rid))
                     .await
-                    .map_err(|e| Error::MailboxError(e))?
+                    .map_err(|e| Error::MailboxError(e))??;
+
+                tracing::info!("successfully inserted entry into index file");
+
+                Ok(())
             }
             .into_actor(self),
         )

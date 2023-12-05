@@ -19,6 +19,7 @@ pub enum Error {
     EncodeError(EncodeError),
     MiscDecodeError,
     InvalidKey,
+    MultiplePrimaryKeyClauses,
 }
 
 impl From<IoError> for Error {
@@ -46,6 +47,9 @@ impl fmt::Display for Error {
             Self::EncodeError(e) => write!(f, "failed to encode a message with protobuf: {:?}", e),
             Self::MiscDecodeError => write!(f, "failed to parse the message"),
             Self::InvalidKey => write!(f, "the value is not a valid key value"),
+            Self::MultiplePrimaryKeyClauses => {
+                write!(f, "the query included multiple primary key clauses")
+            }
         }
     }
 }
@@ -64,7 +68,8 @@ impl StdError for Error {
             | Self::RecordNotFound
             | Self::TraversalError
             | Self::MiscDecodeError
-            | Self::InvalidKey => None,
+            | Self::InvalidKey
+            | Self::MultiplePrimaryKeyClauses => None,
         }
     }
 }
@@ -84,6 +89,7 @@ impl ErrorLike for Error {
             Self::EncodeError(_) => 9,
             Self::MiscDecodeError => 10,
             Self::InvalidKey => 11,
+            Self::MultiplePrimaryKeyClauses => 12,
         }
     }
 }

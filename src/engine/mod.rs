@@ -1,7 +1,7 @@
 use super::{
     error::Error,
     items::Tuple,
-    types::table::{CatalogueEntry, Ty},
+    types::table::{self, CatalogueEntry, Ty},
     util::fs,
 };
 use buffer_pool::{BufferPool, DbHandle, GetBuffer};
@@ -73,19 +73,33 @@ impl Engine {
         if meta.len() == 0 {
             tracing::info!("creating system catalogue");
 
-            let entries = ["table_name", "file_name", "attr_name", "ty"]
-                .into_iter()
-                .filter_map(|attr| {
-                    Some(CatalogueEntry {
-                        table_name: fs::CATALOGUE_TABLE_NAME.to_owned(),
-                        file_name: fs::db_file_path_with_name(fs::CATALOGUE_TABLE_NAME)
+            let entries = [
+                "table_name",
+                "file_name",
+                "index_name",
+                "attr_name",
+                "ty",
+                "primary_key",
+            ]
+            .into_iter()
+            .filter_map(|attr| {
+                Some(CatalogueEntry {
+                    table_name: fs::CATALOGUE_TABLE_NAME.to_owned(),
+                    file_name: fs::db_file_path_with_name(fs::CATALOGUE_TABLE_NAME)
+                        .ok()?
+                        .to_str()?
+                        .to_owned(),
+                    index_name: Some(
+                        fs::index_file_path_with_name(fs::CATALOGUE_TABLE_NAME)
                             .ok()?
                             .to_str()?
                             .to_owned(),
-                        attr_name: attr.to_owned(),
-                        ty: Ty::String,
-                    })
-                });
+                    ),
+                    attr_name: attr.to_owned(),
+                    ty: Ty::String,
+                    primary_key: attr == "table_name" || attr == "attr_name",
+                })
+            });
 
             for ent in entries {
                 catalogue
@@ -117,21 +131,43 @@ impl Handler<CreateTable> for Engine {
     fn handle(&mut self, msg: CreateTable, _ctx: &mut Context<Self>) -> Self::Result {
         tracing::info!("creating table");
 
-        let CreateTable(db_name, table_name, elements) = msg;
+        let CreateTable {
+            db_name,
+            table_name,
+            columns: elements,
+            constraints,
+        } = msg;
         let catalogue = self.catalogue.clone();
 
         Box::pin(
             async move {
+                let pks = table::into_primary_key(constraints)?;
+
                 // Get catalogue entries for all columns in the database
                 let entries = elements.into_iter().filter_map(|(attr_name, ty)| {
+                    // There might not be any primary key
+                    let is_pk = pks
+                        .as_ref()
+                        .map(|pks| pks.iter().any(|pks| pks.contains(&attr_name)))
+                        .unwrap_or(false);
+                    let index_file = pks
+                        .as_ref()
+                        .map(|pks| pks.join("-"))
+                        .and_then(|attr| {
+                            fs::index_file_path_with_name_attr(db_name.as_str(), attr.as_str()).ok()
+                        })
+                        .and_then(|path| Some(path.to_str()?.to_owned()));
+
                     Some(CatalogueEntry {
                         table_name: table_name.clone(),
                         file_name: fs::db_file_path_with_name(db_name.as_str())
                             .ok()?
                             .to_str()?
                             .to_owned(),
+                        index_name: index_file,
                         attr_name,
                         ty,
+                        primary_key: is_pk,
                     })
                 });
 
