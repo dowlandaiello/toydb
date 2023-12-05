@@ -2,11 +2,14 @@ use super::{
     super::{
         error::Error,
         items::{Record, Tuple},
-        types::table::CatalogueEntry,
-        util::rid,
+        types::{
+            db::DbName,
+            table::{CatalogueEntry, TableName},
+        },
+        util::{fs, rid},
     },
-    heap::{HeapHandle, InsertRecord},
-    index::{IndexHandle, InsertKey},
+    heap::{HeapHandle, InsertRecord, LoadRecord},
+    index::{GetKey, IndexHandle, InsertKey},
 };
 use actix::{Actor, Addr, Context, Handler, Message, ResponseActFuture, WrapFuture};
 use prost::Message as ProstMessage;
@@ -15,6 +18,16 @@ use prost::Message as ProstMessage;
 #[derive(Message, Debug)]
 #[rtype(result = "Result<(), Error>")]
 pub struct InsertEntry(pub CatalogueEntry);
+
+/// Gets the catalogue entry for the attribute in the table in the specified database.
+#[derive(Message, Debug)]
+#[rtype(result = "Result<CatalogueEntry, Error>")]
+pub struct GetEntry(pub DbName, pub TableName, pub String);
+
+/// Gets all catalogue entries for the given table in the given database.
+#[derive(Message, Debug)]
+#[rtype(result = "Result<Vec<CatalogueEntry>, Error>")]
+pub struct GetEntries(pub DbName, pub TableName);
 
 #[derive(Debug)]
 pub struct Catalogue {
@@ -40,7 +53,11 @@ impl Handler<InsertEntry> for Catalogue {
         Box::pin(
             async move {
                 // For inserting into the index
-                let k = rid::key_for_rel_db(msg.0.attr_name.as_str(), msg.0.table_name.as_str());
+                let k = rid::key_for_rel_db_attr(
+                    msg.0.file_name.as_str(),
+                    msg.0.table_name.as_str(),
+                    msg.0.attr_name.as_str(),
+                );
 
                 let tuple: Tuple = msg.0.into();
                 let enc = tuple.encode_length_delimited_to_vec();
@@ -71,6 +88,52 @@ impl Handler<InsertEntry> for Catalogue {
                 tracing::info!("successfully inserted entry into index file");
 
                 Ok(())
+            }
+            .into_actor(self),
+        )
+    }
+}
+
+impl Handler<GetEntry> for Catalogue {
+    type Result = ResponseActFuture<Self, Result<CatalogueEntry, Error>>;
+
+    #[tracing::instrument]
+    fn handle(&mut self, msg: GetEntry, _ctx: &mut Context<Self>) -> Self::Result {
+        // Since we are searching by the primary key
+        tracing::info!(
+            "looking up primary key ({}, {}, {}) in the catalogue",
+            msg.0,
+            msg.1,
+            msg.2
+        );
+
+        let index_handle = self.index_db_rel_name_handle.clone();
+        let db_handle = self.db_handle.clone();
+
+        Box::pin(
+            async move {
+                // For looking up in the index
+                let file_name = fs::db_file_path_with_name(msg.0)?;
+                let k = rid::key_for_rel_db_attr(
+                    file_name.as_path().to_str().ok_or(Error::MiscDecodeError)?,
+                    msg.1,
+                    msg.2,
+                );
+
+                // Lookup RID in the index then use that RID to look up in heap
+                let rid = index_handle
+                    .send(GetKey(k))
+                    .await
+                    .map_err(|e| Error::MailboxError(e))??;
+                let record = db_handle
+                    .send(LoadRecord(rid))
+                    .await
+                    .map_err(|e| Error::MailboxError(e))??;
+
+                // Decode the tuple into a catalogue entry, then return
+                let tup = Tuple::decode_length_delimited(record.data.as_slice())
+                    .map_err(|e| Error::DecodeError(e))?;
+                tup.try_into()
             }
             .into_actor(self),
         )

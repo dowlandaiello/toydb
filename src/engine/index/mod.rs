@@ -23,7 +23,7 @@ pub struct GetIndex(pub TableName);
 /// Gets a record pointer from a key.
 #[derive(Message, Debug)]
 #[rtype(result = "Result<RecordId, Error>")]
-pub struct GetKey(u64);
+pub struct GetKey(pub u64);
 
 /// Inserts a record pointer at a key.
 #[derive(Message, Debug)]

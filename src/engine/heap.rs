@@ -23,12 +23,12 @@ pub struct InsertRecord(pub Record);
 /// Loads a record from the heap file.
 #[derive(Message, Debug)]
 #[rtype(result = "Result<Record, Error>")]
-pub struct LoadRecord(RecordId);
+pub struct LoadRecord(pub RecordId);
 
 /// Gets a heap handle for the database.
 #[derive(Message, Debug)]
 #[rtype(result = "Result<Addr<HeapHandle>, Error>")]
-pub struct GetHeap(pub DbName, Addr<DbHandle>);
+pub struct GetHeap(pub DbName, pub Addr<DbHandle>);
 
 /// A message sent to a heaphandle that generates a new iterator.
 #[derive(Message)]
@@ -59,7 +59,7 @@ impl Handler<GetHeap> for HeapPool {
             async move { Ok(HeapHandle { buffer: msg.1 }.start()) }
                 .into_actor(self)
                 .map_ok(|addr, slf, _ctx| {
-                    slf.heaps.insert(msg.0, addr);
+                    slf.heaps.insert(msg.0, addr.clone());
 
                     addr
                 }),

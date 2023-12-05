@@ -1,6 +1,6 @@
 use super::{
     error::Error,
-    items::{Element, Tuple},
+    items::{Element, Record, Tuple},
     types::table::{self, CatalogueEntry, Ty},
     util::fs,
 };
@@ -10,10 +10,11 @@ use cmd::{
     ddl::{CreateDatabase, CreateTable},
     dml::Insert,
 };
-use heap::{HeapHandle, HeapPool};
+use heap::{GetHeap, HeapHandle, HeapPool, InsertRecord};
 use index::{GetIndex, IndexPool};
 
-use actix::{Actor, Addr, Context, Handler, ResponseActFuture, ResponseFuture, WrapFuture};
+use actix::{Actor, Addr, Context, Handler, ResponseActFuture, WrapFuture};
+use prost::Message;
 use tokio::fs::OpenOptions;
 
 pub mod buffer_pool;
@@ -104,7 +105,7 @@ impl Engine {
                     ),
                     attr_name: attr.to_owned(),
                     ty: Ty::String,
-                    primary_key: attr == "table_name" || attr == "attr_name",
+                    primary_key: attr == "file_name" || attr == "table_name" || attr == "attr_name",
                 })
             });
 
@@ -181,7 +182,7 @@ impl Handler<CreateTable> for Engine {
                 });
 
                 // Get an index for the primary key
-                if let Some(pks) = pks {
+                if let Some(pks) = &pks {
                     let _ = index_pool
                         .send(GetIndex(pks.join("-")))
                         .await
@@ -215,6 +216,8 @@ impl Handler<Insert> for Engine {
                 .map(|elem| Element { data: elem })
                 .collect::<Vec<Element>>(),
         };
+        let buffer_pool = self.buffer_pool.clone();
+        let heap_pool = self.heap_pool.clone();
 
         tracing::info!(
             "inserting tuple {:?} into table {} in database {}",
@@ -225,7 +228,28 @@ impl Handler<Insert> for Engine {
 
         Box::pin(
             async move {
-                // Get the heap handle for the file
+                let tuple_enc = tuple.encode_length_delimited_to_vec();
+
+                let db_handle = buffer_pool
+                    .send(GetBuffer(msg.db_name.clone()))
+                    .await
+                    .map_err(|e| Error::MailboxError(e))??;
+                let heap_handle = heap_pool
+                    .send(GetHeap(msg.db_name, db_handle))
+                    .await
+                    .map_err(|e| Error::MailboxError(e))??;
+
+                // Insert the tuple into the heap
+                heap_handle
+                    .send(InsertRecord(Record {
+                        size: tuple_enc.len() as u64,
+                        data: tuple_enc,
+                    }))
+                    .await
+                    .map_err(|e| Error::MailboxError(e))??;
+
+                // Check the catalogue to see if there is a primary key for this table
+
                 Ok(())
             }
             .into_actor(self),
