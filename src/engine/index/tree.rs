@@ -447,6 +447,7 @@ fn follow_node(
                         return Err((e, handle));
                     }
                 };
+            tracing::debug!("got record length {} at pos {}", length_delim, pos);
             let delim_len = prost::length_delimiter_len(length_delim);
 
             // Make a buffer for the size of the node
@@ -468,6 +469,8 @@ fn follow_node(
                 return Err((e, handle));
             }
 
+            tracing::debug!("read node bytes: {:?}", node_buff);
+
             // Read a node from the buff
             let node = match BTreeInternalNode::decode_length_delimited(node_buff.as_slice())
                 .map_err(|e| Error::DecodeError(e))
@@ -477,6 +480,8 @@ fn follow_node(
                     return Err((e, handle));
                 }
             };
+
+            tracing::debug!("decoded node");
 
             // If the current node is a leaf AND we are looking for a leaf load the node and return the record pointer
             if node.is_leaf_node && target == SearchTarget::LeafNode {
@@ -630,12 +635,14 @@ impl TreeHandle {
             return Err((Error::TraversalError, f));
         }
 
+        tracing::debug!("inserting leaf node and internal node");
+
         let mut root_node = create_internal_node();
         let body_len = root_node.encoded_len();
         let len_len = prost::length_delimiter_len(body_len);
         if let Err(e) = insert_internal(
             &mut root_node,
-            SearchKey::Lt(msg.0),
+            SearchKey::Gt(msg.0),
             (body_len + len_len) as u64,
         ) {
             return Err((e, f));
@@ -647,6 +654,21 @@ impl TreeHandle {
         }
 
         // Write the two blocks to the file
+        if let Err(e) = f
+            .seek(SeekFrom::Start(0))
+            .await
+            .map_err(|e| Error::IoError(e))
+        {
+            return Err((e, f));
+        }
+
+        tracing::debug!(
+            "inserting root node {:?} at pos {} with length {}",
+            root_node,
+            0,
+            body_len + len_len
+        );
+
         if let Err(e) = f
             .write_all(root_node.encode_length_delimited_to_vec().as_slice())
             .await
@@ -661,6 +683,8 @@ impl TreeHandle {
         {
             return Err((e, f));
         }
+
+        tracing::debug!("wrote leaf node and internal node to disk at pos 0");
 
         Ok(((), f))
     }
@@ -696,6 +720,11 @@ impl TreeHandle {
             return Err((e, f));
         }
 
+        tracing::debug!(
+            "writing updated parent node to disk at pos {}",
+            candidate_pos
+        );
+
         // Write the node
         if let Err(e) = f.seek(SeekFrom::Start(candidate_pos)).await {
             return Err((Error::IoError(e), f));
@@ -703,6 +732,201 @@ impl TreeHandle {
 
         if let Err(e) = f
             .write_all(n.encode_length_delimited_to_vec().as_slice())
+            .await
+        {
+            return Err((Error::IoError(e), f));
+        }
+
+        Ok(((), f))
+    }
+
+    async fn insert_candidate_internal_node(
+        f: OwnedMutexGuard<File>,
+        msg: &InsertKey,
+    ) -> Result<((), OwnedMutexGuard<File>), (Error, OwnedMutexGuard<File>)> {
+        let (candidate_internal_node, candidate_pos, mut f) =
+            match follow_node(f, 0, msg.0, SearchTarget::InternalNode).await {
+                Ok(x) => x,
+                Err(e) => {
+                    return Err(e);
+                }
+            };
+
+        tracing::debug!(
+            "inserting leaf node into internal node {:?}",
+            candidate_internal_node
+        );
+
+        let mut n = match candidate_internal_node {
+            Some(SearchResult::InternalNode(n)) => n,
+            _ => {
+                return Err((Error::TraversalError, f));
+            }
+        };
+
+        let n_size = n.encoded_len();
+        let len_len = prost::length_delimiter_len(n_size);
+        let total_n_size = n_size + len_len;
+
+        // Make a new leaf node
+        let mut leaf = create_leaf_node();
+        if let Err(e) = insert_leaf(
+            &mut leaf,
+            msg.0,
+            RecordIdPointer {
+                is_empty: false,
+                page: msg.1.page,
+                page_idx: msg.1.page_idx,
+            },
+        ) {
+            return Err((e, f));
+        }
+
+        if let Err(e) = insert_internal(
+            &mut n,
+            SearchKey::Gt(msg.0),
+            candidate_pos as u64 + total_n_size as u64,
+        ) {
+            return Err((e, f));
+        }
+
+        tracing::debug!(
+            "writing node {:?} at disk pos {} with length {}",
+            n,
+            candidate_pos,
+            total_n_size
+        );
+
+        // Write the node
+        if let Err(e) = f.seek(SeekFrom::Start(candidate_pos)).await {
+            return Err((Error::IoError(e), f));
+        }
+
+        if let Err(e) = f
+            .write_all(n.encode_length_delimited_to_vec().as_slice())
+            .await
+        {
+            return Err((Error::IoError(e), f));
+        }
+
+        tracing::debug!(
+            "writing leaf node {:?} at disk pos {}",
+            leaf,
+            candidate_pos as u64 + total_n_size as u64
+        );
+
+        // Write the leaf node
+        if let Err(e) = f
+            .seek(SeekFrom::Start(candidate_pos as u64 + total_n_size as u64))
+            .await
+        {
+            return Err((Error::IoError(e), f));
+        }
+
+        if let Err(e) = f
+            .write_all(leaf.encode_length_delimited_to_vec().as_slice())
+            .await
+        {
+            return Err((Error::IoError(e), f));
+        }
+
+        tracing::debug!("inserted successfuly: {:?}", n);
+
+        Ok(((), f))
+    }
+
+    async fn split_internal_node(
+        mut f: OwnedMutexGuard<File>,
+        msg: &InsertKey,
+    ) -> Result<((), OwnedMutexGuard<File>), (Error, OwnedMutexGuard<File>)> {
+        tracing::debug!("splitting internal node with {:?}", msg);
+
+        let (candidate_internal_node, candidate_pos, mut f) =
+            match follow_node(f, 0, msg.0, SearchTarget::InternalNode).await {
+                Ok(x) => x,
+                Err(e) => {
+                    return Err(e);
+                }
+            };
+
+        let n = match candidate_internal_node {
+            Some(SearchResult::InternalNode(n)) => n,
+            _ => {
+                return Err((Error::TraversalError, f));
+            }
+        };
+
+        // Split the node up into left and right nodes
+        let left = left_values_internal(&n);
+        let right = left_values_internal(&n);
+        let med = median(Node::InternalNode(&n));
+
+        // Insert all values in appropriate nodes
+        let mut left_n = create_internal_node();
+        let mut right_n = create_internal_node();
+
+        let left_len = left_n.encoded_len();
+        let left_len_len = prost::length_delimiter_len(left_len);
+        let total_left_len = left_len + left_len_len;
+
+        for (k, v) in left {
+            if let Err(e) = insert_internal(&mut left_n, SearchKey::Gt(k), v) {
+                return Err((e, f));
+            }
+        }
+
+        for (k, v) in right {
+            if let Err(e) = insert_internal(&mut right_n, SearchKey::Gt(k), v) {
+                return Err((e, f));
+            }
+        }
+
+        // Create a new parent node
+        let mut parent = create_internal_node();
+        let len = parent.encoded_len();
+        let len_len = prost::length_delimiter_len(len);
+        let total_parent_len = len + len_len;
+
+        if let Err(e) = insert_internal(
+            &mut parent,
+            SearchKey::Lt(med),
+            candidate_pos as u64 + total_parent_len as u64,
+        ) {
+            return Err((e, f));
+        }
+        if let Err(e) = insert_internal(
+            &mut parent,
+            SearchKey::Gt(med),
+            candidate_pos as u64 + total_parent_len as u64 + total_left_len as u64,
+        ) {
+            return Err((e, f));
+        }
+
+        // Insert the parent in its original spot
+        if let Err(e) = f.seek(SeekFrom::Start(candidate_pos)).await {
+            return Err((Error::IoError(e), f));
+        }
+        if let Err(e) = f
+            .write_all(parent.encode_length_delimited_to_vec().as_slice())
+            .await
+        {
+            return Err((Error::IoError(e), f));
+        }
+
+        // Insert the child nodes at the end of the file
+        if let Err(e) = f.seek(SeekFrom::End(0)).await {
+            return Err((Error::IoError(e), f));
+        }
+
+        if let Err(e) = f
+            .write_all(left_n.encode_length_delimited_to_vec().as_slice())
+            .await
+        {
+            return Err((Error::IoError(e), f));
+        }
+
+        if let Err(e) = f
+            .write_all(right_n.encode_length_delimited_to_vec().as_slice())
             .await
         {
             return Err((Error::IoError(e), f));
@@ -756,6 +980,8 @@ impl Handler<InsertKey> for TreeHandle {
                     // If we can insert this as the root, do so
                     match Self::insert_empty_tree(f, &msg).await {
                         Ok((x, _)) => {
+                            tracing::debug!("inserted in empty tree");
+
                             return Ok(x);
                         }
                         Err((Error::TraversalError, fi)) => {
@@ -770,7 +996,46 @@ impl Handler<InsertKey> for TreeHandle {
 
                     // Insertion procedure priority:
                     //
-                    // 1. Find the leaf node that this belongs in that has space
+                    // 1. Find the leaf node that this belongs in that has space and
+                    // insert in that
+                    match Self::insert_candidate_leaf_node(f, &msg).await {
+                        Ok((x, _)) => {
+                            tracing::debug!("inserted in candidate leaf node");
+
+                            return Ok(x);
+                        }
+                        Err((Error::TraversalError, fi)) => {
+                            f = fi;
+                        }
+                        Err((e, _)) => {
+                            tracing::error!("could not find a candidate node: {:?}", e);
+
+                            return Err(e);
+                        }
+                    };
+
+                    // 2. Insert a new leaf node in the internal node
+                    match Self::insert_candidate_internal_node(f, &msg).await {
+                        Ok((x, _)) => {
+                            tracing::debug!("inserted in candidate internal node");
+
+                            return Ok(x);
+                        }
+                        Err((Error::TraversalError, fi)) => {
+                            f = fi;
+                        }
+                        Err((e, _)) => {
+                            return Err(e);
+                        }
+                    };
+
+                    // 3. Split the internal node, and try again
+                    match Self::split_internal_node(f, &msg).await {
+                        Ok(_) => {}
+                        Err((e, _)) => {
+                            return Err(e);
+                        }
+                    }
                 }
 
                 addr.send(msg).await.map_err(|e| Error::MailboxError(e))?
@@ -1328,7 +1593,7 @@ mod tests {
             let mut rng = rand::thread_rng();
 
             // Insert a shitton of random keys
-            for i in 0..2 {
+            for i in 0..5 {
                 let mut k: u64 = rng.gen();
 
                 while k == 0 {
