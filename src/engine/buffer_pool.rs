@@ -123,7 +123,7 @@ impl Handler<LoadPage> for DbHandle {
 
     #[tracing::instrument]
     fn handle(&mut self, msg: LoadPage, _ctx: &mut Context<Self>) -> Self::Result {
-        tracing::info!("loading page");
+        tracing::debug!("loading page");
 
         // If the page already exists, return it
         if let Some(Some(page)) = self.pages.get(msg.0) {
@@ -220,7 +220,7 @@ impl Handler<WritePage> for DbHandle {
 
     #[tracing::instrument]
     fn handle(&mut self, msg: WritePage, _ctx: &mut Context<Self>) -> Self::Result {
-        tracing::info!("writing page");
+        tracing::debug!("writing page");
 
         // Write the page to memory
         self.pages[msg.0] = Some(msg.1.clone());
