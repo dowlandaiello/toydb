@@ -1,8 +1,10 @@
 use super::super::{
     error::Error,
     items::{Element, Tuple},
+    util::fs,
 };
 use serde::{Deserialize, Serialize};
+use std::mem;
 
 /// A name associated with a table.
 pub type TableName = String;
@@ -58,12 +60,20 @@ pub fn into_primary_key(
     Ok(Some(pks.remove(0)))
 }
 
+/// A typed tuple.
+pub struct TypedTuple(pub Vec<Value>);
+
+/// A typed value.
+pub enum Value {
+    String(String),
+    Integer(i64),
+}
+
 /// A type of a value in a column in a table.
 #[derive(Serialize, Deserialize, Debug)]
 pub enum Ty {
     String,
     Integer,
-    Float,
 }
 
 impl TryFrom<Vec<u8>> for Ty {
@@ -75,7 +85,6 @@ impl TryFrom<Vec<u8>> for Ty {
         match v {
             0 => Ok(Self::String),
             1 => Ok(Self::Integer),
-            2 => Ok(Self::Float),
             _ => Err(Error::MiscDecodeError),
         }
     }
@@ -86,7 +95,6 @@ impl From<Ty> for u8 {
         match t {
             Ty::String => 0,
             Ty::Integer => 1,
-            Ty::Float => 2,
         }
     }
 }
@@ -104,6 +112,7 @@ pub struct CatalogueEntry {
     pub file_name: String,
     pub index_name: Option<String>,
     pub attr_name: String,
+    pub attr_index: usize,
     pub ty: Ty,
     pub primary_key: bool,
 }
@@ -113,7 +122,7 @@ impl TryFrom<Tuple> for CatalogueEntry {
 
     #[tracing::instrument]
     fn try_from(mut tup: Tuple) -> Result<Self, Error> {
-        if tup.elements.len() < 6 {
+        if tup.elements.len() < 7 {
             return Err(Error::MiscDecodeError);
         }
 
@@ -131,6 +140,15 @@ impl TryFrom<Tuple> for CatalogueEntry {
         };
         let attr_name =
             String::from_utf8(tup.elements.remove(0).data).map_err(|_| Error::MiscDecodeError)?;
+
+        let attr_index_bytes: [u8; mem::size_of::<usize>()] = tup
+            .elements
+            .remove(0)
+            .data
+            .try_into()
+            .map_err(|_| Error::MiscDecodeError)?;
+        let attr_index: usize = usize::from_le_bytes(attr_index_bytes);
+
         let ty = tup.elements.remove(0).data.try_into()?;
         let primary_key: bool = tup.elements.remove(0).data[0] != 0;
 
@@ -139,6 +157,7 @@ impl TryFrom<Tuple> for CatalogueEntry {
             file_name,
             index_name,
             attr_name,
+            attr_index,
             ty,
             primary_key,
         })
@@ -154,15 +173,18 @@ impl From<CatalogueEntry> for Tuple {
             .map(|name| name.into_bytes())
             .unwrap_or_default();
         let attr_name = cat.attr_name.into_bytes();
+        let attr_index = cat.attr_index.to_le_bytes().to_vec();
         let ty = cat.ty.into();
         let primary_key: u8 = cat.primary_key.into();
 
         Tuple {
+            rel_name: fs::CATALOGUE_TABLE_NAME.to_owned(),
             elements: vec![
                 Element { data: table_name },
                 Element { data: file_name },
                 Element { data: index_name },
                 Element { data: attr_name },
+                Element { data: attr_index },
                 Element { data: ty },
                 Element {
                     data: vec![primary_key],

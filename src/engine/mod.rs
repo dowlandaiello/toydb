@@ -3,20 +3,22 @@ use crate::util::rid;
 use super::{
     error::Error,
     items::{Element, Record, Tuple},
-    types::table::{self, CatalogueEntry, Ty},
+    types::table::{self, CatalogueEntry, Ty, TypedTuple, Value},
     util::fs,
 };
 use buffer_pool::{BufferPool, DbHandle, GetBuffer};
 use catalogue::{Catalogue, GetEntries, InsertEntry};
 use cmd::{
     ddl::{CreateDatabase, CreateTable},
-    dml::Insert,
+    dml::{Insert, Select},
 };
-use heap::{GetHeap, HeapHandle, HeapPool, InsertRecord};
-use index::{GetIndex, IndexPool, InsertKey};
+use heap::{GetHeap, HeapHandle, HeapPool, InsertRecord, Iter as HeapIter};
+use index::{GetIndex, IndexPool, InsertKey, Iter};
+use iterator::Next;
 
 use actix::{Actor, Addr, Context, Handler, ResponseActFuture, WrapFuture};
 use prost::Message;
+use std::mem;
 use tokio::fs::OpenOptions;
 
 pub mod buffer_pool;
@@ -88,11 +90,13 @@ impl Engine {
                 "file_name",
                 "index_name",
                 "attr_name",
+                "attr_index",
                 "ty",
                 "primary_key",
             ]
             .into_iter()
-            .filter_map(|attr| {
+            .enumerate()
+            .filter_map(|(i, attr)| {
                 Some(CatalogueEntry {
                     table_name: fs::CATALOGUE_TABLE_NAME.to_owned(),
                     file_name: fs::db_file_path_with_name(fs::CATALOGUE_TABLE_NAME)
@@ -106,6 +110,7 @@ impl Engine {
                             .to_owned(),
                     ),
                     attr_name: attr.to_owned(),
+                    attr_index: i,
                     ty: Ty::String,
                     primary_key: attr == "file_name" || attr == "table_name" || attr == "attr_name",
                 })
@@ -156,32 +161,41 @@ impl Handler<CreateTable> for Engine {
                 let pks = table::into_primary_key(constraints)?;
 
                 // Get catalogue entries for all columns in the database
-                let entries = elements.into_iter().filter_map(|(attr_name, ty)| {
-                    // There might not be any primary key
-                    let is_pk = pks
-                        .as_ref()
-                        .map(|pks| pks.iter().any(|pks| pks.contains(&attr_name)))
-                        .unwrap_or(false);
-                    let index_file = pks
-                        .as_ref()
-                        .map(|pks| pks.join("-"))
-                        .and_then(|attr| {
-                            fs::index_file_path_with_name_attr(db_name.as_str(), attr.as_str()).ok()
-                        })
-                        .and_then(|path| Some(path.to_str()?.to_owned()));
+                let entries =
+                    elements
+                        .into_iter()
+                        .enumerate()
+                        .filter_map(|(i, (attr_name, ty))| {
+                            // There might not be any primary key
+                            let is_pk = pks
+                                .as_ref()
+                                .map(|pks| pks.iter().any(|pks| pks.contains(&attr_name)))
+                                .unwrap_or(false);
+                            let index_file = pks
+                                .as_ref()
+                                .map(|pks| pks.join("-"))
+                                .and_then(|attr| {
+                                    fs::index_file_path_with_name_attr(
+                                        db_name.as_str(),
+                                        attr.as_str(),
+                                    )
+                                    .ok()
+                                })
+                                .and_then(|path| Some(path.to_str()?.to_owned()));
 
-                    Some(CatalogueEntry {
-                        table_name: table_name.clone(),
-                        file_name: fs::db_file_path_with_name(db_name.as_str())
-                            .ok()?
-                            .to_str()?
-                            .to_owned(),
-                        index_name: index_file,
-                        attr_name,
-                        ty,
-                        primary_key: is_pk,
-                    })
-                });
+                            Some(CatalogueEntry {
+                                table_name: table_name.clone(),
+                                file_name: fs::db_file_path_with_name(db_name.as_str())
+                                    .ok()?
+                                    .to_str()?
+                                    .to_owned(),
+                                index_name: index_file,
+                                attr_name,
+                                attr_index: i,
+                                ty,
+                                primary_key: is_pk,
+                            })
+                        });
 
                 // Get an index for the primary key
                 if let Some(pks) = &pks {
@@ -211,29 +225,13 @@ impl Handler<Insert> for Engine {
 
     #[tracing::instrument]
     fn handle(&mut self, msg: Insert, _ctx: &mut Context<Self>) -> Self::Result {
-        let tuple = Tuple {
-            elements: msg
-                .values
-                .iter()
-                .map(|elem| Element { data: elem.clone() })
-                .collect::<Vec<Element>>(),
-        };
         let buffer_pool = self.buffer_pool.clone();
         let heap_pool = self.heap_pool.clone();
         let catalogue = self.catalogue.clone();
         let index_pool = self.index_pool.clone();
 
-        tracing::info!(
-            "inserting tuple {:?} into table {} in database {}",
-            tuple,
-            msg.table_name,
-            msg.db_name
-        );
-
         Box::pin(
             async move {
-                let tuple_enc = tuple.encode_length_delimited_to_vec();
-
                 let db_handle = buffer_pool
                     .send(GetBuffer(msg.db_name.clone()))
                     .await
@@ -242,6 +240,30 @@ impl Handler<Insert> for Engine {
                     .send(GetHeap(msg.db_name.clone(), db_handle))
                     .await
                     .map_err(|e| Error::MailboxError(e))??;
+
+                // Check the catalogue to see if there is a primary key for this table
+                let cat = catalogue
+                    .send(GetEntries(msg.db_name.clone(), msg.table_name.clone()))
+                    .await
+                    .map_err(|e| Error::MailboxError(e))?
+                    .map_err(|_| Error::MissingCatalogueEntry)?;
+
+                let tuple = Tuple {
+                    rel_name: msg.table_name.clone(),
+                    elements: msg
+                        .values
+                        .iter()
+                        .map(|elem| Element { data: elem.clone() })
+                        .collect::<Vec<Element>>(),
+                };
+                let tuple_enc = tuple.encode_length_delimited_to_vec();
+
+                tracing::info!(
+                    "inserting tuple {:?} into table {} in database {}",
+                    tuple,
+                    msg.table_name,
+                    msg.db_name
+                );
 
                 // Insert the tuple into the heap
                 let rid = heap_handle
@@ -254,41 +276,158 @@ impl Handler<Insert> for Engine {
 
                 tracing::debug!("successfully inserted tuple into the heap");
 
-                // Check the catalogue to see if there is a primary key for this table
-                if let Ok(cat) = catalogue
-                    .send(GetEntries(msg.db_name, msg.table_name.clone()))
+                // There are primary keys, so let's find them and make a composite key
+                // of them
+                let primary_keys = cat
+                    .iter()
+                    .enumerate()
+                    .filter(|(_, cat)| cat.primary_key)
+                    .map(|(i, _)| i)
+                    .collect::<Vec<usize>>();
+                let k_values = msg
+                    .values
+                    .iter()
+                    .enumerate()
+                    .filter(|(i, _)| primary_keys.contains(i))
+                    .map(|(_, value)| value.clone())
+                    .collect::<Vec<Vec<u8>>>();
+
+                let composite_key = rid::key_for_composite_key(k_values);
+
+                // Insert into the index
+                let idx = index_pool
+                    .send(GetIndex(msg.table_name))
                     .await
-                    .map_err(|e| Error::MailboxError(e))?
-                {
-                    // There are primary keys, so let's find them and make a composite key
-                    // of them
-                    let primary_keys = cat
-                        .iter()
-                        .enumerate()
-                        .filter(|(_, cat)| cat.primary_key)
-                        .map(|(i, _)| i)
-                        .collect::<Vec<usize>>();
-                    let k_values = msg
-                        .values
-                        .iter()
-                        .enumerate()
-                        .filter(|(i, _)| primary_keys.contains(i))
-                        .map(|(_, value)| value.clone())
-                        .collect::<Vec<Vec<u8>>>();
-
-                    let composite_key = rid::key_for_composite_key(k_values);
-
-                    // Insert into the index
-                    let idx = index_pool
-                        .send(GetIndex(msg.table_name))
-                        .await
-                        .map_err(|e| Error::MailboxError(e))??;
-                    idx.send(InsertKey(composite_key, rid))
-                        .await
-                        .map_err(|e| Error::MailboxError(e))??;
-                }
+                    .map_err(|e| Error::MailboxError(e))??;
+                idx.send(InsertKey(composite_key, rid))
+                    .await
+                    .map_err(|e| Error::MailboxError(e))??;
 
                 Ok(())
+            }
+            .into_actor(self),
+        )
+    }
+}
+
+impl Handler<Select> for Engine {
+    type Result = ResponseActFuture<Self, Result<Vec<TypedTuple>, Error>>;
+
+    fn handle(&mut self, msg: Select, _ctx: &mut Context<Self>) -> Self::Result {
+        let heap_pool = self.heap_pool.clone();
+        let buffer_pool = self.buffer_pool.clone();
+        let catalogue = self.catalogue.clone();
+        let index_pool = self.index_pool.clone();
+
+        Box::pin(
+            async move {
+                let db_handle = buffer_pool
+                    .send(GetBuffer(msg.db_name.clone()))
+                    .await
+                    .map_err(|e| Error::MailboxError(e))??;
+                let heap_handle = heap_pool
+                    .send(GetHeap(msg.db_name.clone(), db_handle.clone()))
+                    .await
+                    .map_err(|e| Error::MailboxError(e))??;
+
+                // Look up the table to see if there's an index we can scan over to be more selective
+                let mut cat = catalogue
+                    .send(GetEntries(msg.db_name, msg.table_name.clone()))
+                    .await
+                    .map_err(|e| Error::MailboxError(e))??;
+
+                let mut untyped_results: Vec<Tuple> = Vec::new();
+
+                if let Some(index_name) = cat
+                    .get(0)
+                    .and_then(|cat| cat.index_name.as_ref())
+                    .and_then(|index_path| fs::index_name_from_file_path(index_path))
+                {
+                    let idx = index_pool
+                        .send(GetIndex(index_name))
+                        .await
+                        .map_err(|e| Error::MailboxError(e))??;
+
+                    // Get an iterator over the index
+                    let iter = idx
+                        .send(Iter(db_handle))
+                        .await
+                        .map_err(|e| Error::MailboxError(e))??;
+
+                    // Keep polling the iterator for results until none are left
+                    let mut next: Option<Tuple> =
+                        iter.send(Next).await.map_err(|e| Error::MailboxError(e))?;
+
+                    loop {
+                        let n = if let Some(next) = next {
+                            next
+                        } else {
+                            break;
+                        };
+
+                        untyped_results.push(n);
+
+                        next = iter.send(Next).await.map_err(|e| Error::MailboxError(e))?;
+                    }
+                } else {
+                    // Get an iterator over the heap
+                    let iter = heap_handle
+                        .send(HeapIter)
+                        .await
+                        .map_err(|e| Error::MailboxError(e))?;
+
+                    // Keep polling the iterator for results until none are left
+                    let mut next: Option<Tuple> =
+                        iter.send(Next).await.map_err(|e| Error::MailboxError(e))?;
+
+                    loop {
+                        let n = if let Some(next) = next {
+                            next
+                        } else {
+                            break;
+                        };
+
+                        if n.rel_name == msg.table_name {
+                            untyped_results.push(n);
+                        }
+
+                        next = iter.send(Next).await.map_err(|e| Error::MailboxError(e))?;
+                    }
+                }
+
+                // Convert all the untyped results into typed results
+                let mut typed_results: Vec<TypedTuple> = Vec::new();
+
+                // Generate functions for converting each column
+                cat.sort_by_key(|x| x.attr_index);
+
+                // Converts an element to the typed value of the column at its index
+                let conv = |elem: Element, index: usize| -> Result<Value, Error> {
+                    let ent = &cat[index];
+
+                    match ent.ty {
+                        Ty::String => Ok(Value::String(
+                            String::from_utf8(elem.data).map_err(|_| Error::MiscDecodeError)?,
+                        )),
+                        Ty::Integer => {
+                            let int_bytes: [u8; mem::size_of::<i64>()] =
+                                elem.data.try_into().map_err(|_| Error::MiscDecodeError)?;
+                            Ok(Value::Integer(i64::from_le_bytes(int_bytes)))
+                        }
+                    }
+                };
+
+                for tup in untyped_results {
+                    let mut row: Vec<Value> = Vec::new();
+
+                    for (i, elem) in tup.elements.into_iter().enumerate() {
+                        row.push(conv(elem, i)?);
+                    }
+
+                    typed_results.push(TypedTuple(row));
+                }
+
+                Ok(typed_results)
             }
             .into_actor(self),
         )

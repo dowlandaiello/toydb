@@ -8,7 +8,7 @@ use super::{
         buffer_pool::{DbHandle, LoadPage},
         iterator::Next,
     },
-    GetKey, InsertKey,
+    GetKey, InsertKey, Iter,
 };
 use actix::{
     Actor, Addr, AsyncContext, Context, Handler, Message, ResponseActFuture, ResponseFuture,
@@ -25,11 +25,6 @@ use tokio::{
 
 /// The number of children per node in the B+ tree
 pub const ORDER: usize = 4;
-
-/// A message requesting that an actor create a new iterator.
-#[derive(Message)]
-#[rtype(result = "Result<Addr<TreeHandleIterator>, Error>")]
-pub struct Iter(Addr<DbHandle>);
 
 /// Gets the next leaf node from the seeker identified by the ID.
 #[derive(Message)]

@@ -24,10 +24,15 @@ pub fn db_file_path_with_name(name: impl Display) -> Result<PathBuf, Error> {
 }
 
 /// Obtains a database name from a fully qualified path.
-pub fn db_name_from_file_path<'a>(path: impl AsRef<Path>) -> Option<String> {
+pub fn db_name_from_file_path(path: impl AsRef<Path>) -> Option<String> {
     path.as_ref()
         .file_stem()
         .and_then(|s| s.to_str().map(|s| s.to_owned()))
+}
+
+/// Obtains an index name from a fully qualified path
+pub fn index_name_from_file_path(path: impl AsRef<Path>) -> Option<String> {
+    db_name_from_file_path(path)
 }
 
 /// Obtains a relative path to an index file with the index name `name`.

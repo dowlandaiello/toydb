@@ -20,6 +20,7 @@ pub enum Error {
     MiscDecodeError,
     InvalidKey,
     MultiplePrimaryKeyClauses,
+    MissingCatalogueEntry,
 }
 
 impl From<IoError> for Error {
@@ -50,6 +51,7 @@ impl fmt::Display for Error {
             Self::MultiplePrimaryKeyClauses => {
                 write!(f, "the query included multiple primary key clauses")
             }
+            Self::MissingCatalogueEntry => write!(f, "missing catalogue entry"),
         }
     }
 }
@@ -69,7 +71,8 @@ impl StdError for Error {
             | Self::TraversalError
             | Self::MiscDecodeError
             | Self::InvalidKey
-            | Self::MultiplePrimaryKeyClauses => None,
+            | Self::MultiplePrimaryKeyClauses
+            | Self::MissingCatalogueEntry => None,
         }
     }
 }
@@ -90,6 +93,7 @@ impl ErrorLike for Error {
             Self::MiscDecodeError => 10,
             Self::InvalidKey => 11,
             Self::MultiplePrimaryKeyClauses => 12,
+            Self::MissingCatalogueEntry => 13,
         }
     }
 }

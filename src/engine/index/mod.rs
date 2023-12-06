@@ -2,7 +2,7 @@ pub mod tree;
 
 use super::{
     super::{error::Error, items::RecordId, types::table::TableName, util::fs},
-    buffer_pool::PAGE_SIZE,
+    buffer_pool::{DbHandle, PAGE_SIZE},
 };
 use actix::{
     Actor, ActorTryFutureExt, Addr, Context, Handler, Message, ResponseActFuture, ResponseFuture,
@@ -10,7 +10,7 @@ use actix::{
 };
 use std::{collections::HashMap, future, sync::Arc};
 use tokio::{fs::OpenOptions, sync::Mutex};
-use tree::TreeHandle;
+use tree::{TreeHandle, TreeHandleIterator};
 
 /// 4 pages can fit in an index cache
 const MAX_TENANTS: usize = PAGE_SIZE * 4;
@@ -29,6 +29,11 @@ pub struct GetKey(pub u64);
 #[derive(Message, Debug)]
 #[rtype(result = "Result<(), Error>")]
 pub struct InsertKey(pub u64, pub RecordId);
+
+/// A message requesting that an actor create a new iterator.
+#[derive(Message)]
+#[rtype(result = "Result<Addr<TreeHandleIterator>, Error>")]
+pub struct Iter(pub Addr<DbHandle>);
 
 /// An open abstraction representing a cached index for a database.
 #[derive(Debug)]
@@ -99,6 +104,24 @@ impl Handler<InsertKey> for IndexHandle {
             self.record_cache.remove(&to_remove);
         }
 
+        let tree_handle = self.tree_handle.clone();
+
+        Box::pin(
+            async move {
+                tree_handle
+                    .send(msg)
+                    .await
+                    .map_err(|e| Error::MailboxError(e))?
+            }
+            .into_actor(self),
+        )
+    }
+}
+
+impl Handler<Iter> for IndexHandle {
+    type Result = ResponseActFuture<Self, Result<Addr<TreeHandleIterator>, Error>>;
+
+    fn handle(&mut self, msg: Iter, _ctx: &mut Context<Self>) -> Self::Result {
         let tree_handle = self.tree_handle.clone();
 
         Box::pin(
