@@ -757,8 +757,10 @@ impl TreeHandle {
             };
 
         tracing::debug!(
-            "inserting leaf node into internal node {:?}",
-            candidate_internal_node
+            "inserting leaf node into internal node {:?} with key {} and value {:?}",
+            candidate_internal_node,
+            msg.0,
+            msg.1.clone(),
         );
 
         let mut n = match candidate_internal_node {
@@ -786,11 +788,24 @@ impl TreeHandle {
             return Err((e, f));
         }
 
-        if let Err(e) = insert_internal(
-            &mut n,
-            SearchKey::Gt(msg.0),
-            candidate_pos as u64 + total_n_size as u64,
-        ) {
+        let insert_pos = match f.seek(SeekFrom::End(0)).await {
+            Err(e) => {
+                return Err((Error::IoError(e), f));
+            }
+            Ok(v) => v,
+        };
+
+        tracing::debug!("writing leaf node {:?} at disk pos {}", leaf, insert_pos,);
+
+        // Write the leaf node
+        if let Err(e) = f
+            .write_all(leaf.encode_length_delimited_to_vec().as_slice())
+            .await
+        {
+            return Err((Error::IoError(e), f));
+        }
+
+        if let Err(e) = insert_internal(&mut n, SearchKey::Gt(msg.0), insert_pos) {
             return Err((e, f));
         }
 
@@ -808,27 +823,6 @@ impl TreeHandle {
 
         if let Err(e) = f
             .write_all(n.encode_length_delimited_to_vec().as_slice())
-            .await
-        {
-            return Err((Error::IoError(e), f));
-        }
-
-        tracing::debug!(
-            "writing leaf node {:?} at disk pos {}",
-            leaf,
-            candidate_pos as u64 + total_n_size as u64
-        );
-
-        // Write the leaf node
-        if let Err(e) = f
-            .seek(SeekFrom::Start(candidate_pos as u64 + total_n_size as u64))
-            .await
-        {
-            return Err((Error::IoError(e), f));
-        }
-
-        if let Err(e) = f
-            .write_all(leaf.encode_length_delimited_to_vec().as_slice())
             .await
         {
             return Err((Error::IoError(e), f));
@@ -1105,6 +1099,8 @@ impl Handler<Iter> for TreeHandle {
                     return Err(e);
                 }
             };
+
+            tracing::debug!("collected nodes for iteration: {:?}", res);
 
             seekers.insert(iter.clone(), res);
 

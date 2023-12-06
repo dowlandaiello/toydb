@@ -277,7 +277,7 @@ impl Handler<Insert> for Engine {
                     .await
                     .map_err(|e| Error::MailboxError(e))??;
 
-                tracing::debug!("successfully inserted tuple into the heap");
+                tracing::debug!("successfully inserted tuple into the heap: {:?}", rid);
 
                 // There are primary keys, so let's find them and make a composite key
                 // of them
