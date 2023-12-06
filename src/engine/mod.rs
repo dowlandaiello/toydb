@@ -457,6 +457,13 @@ impl Handler<Select> for Engine {
                     typed_results.push(TypedTuple(row));
                 }
 
+                tracing::info!(
+                    "selected {} results from {} in {}",
+                    typed_results.len(),
+                    msg.table_name,
+                    msg.db_name
+                );
+
                 Ok(typed_results)
             }
             .into_actor(self),
