@@ -542,6 +542,7 @@ pub struct TreeHandle {
 
 impl TreeHandle {
     /// Constructs a plan of leaf nodes to iterate through
+    #[tracing::instrument]
     fn collect_nodes(
         mut handle: OwnedMutexGuard<File>,
         curr_pos: u64,
@@ -593,8 +594,13 @@ impl TreeHandle {
                         return Err((Error::DecodeError(e), handle));
                     }
                 };
+
+                tracing::debug!("finished path with leaf node: {:?}", node);
+
                 return Ok((vec![node], handle));
             }
+
+            tracing::debug!("collecting children for internal node: {:?}", node);
 
             let mut leaves = Vec::new();
 
@@ -603,9 +609,11 @@ impl TreeHandle {
                 .keys_pointers
                 .iter()
                 .enumerate()
-                .filter(|(i, _)| i % 2 == 0)
+                .filter(|(i, _)| i % 2 != 0)
                 .map(|(_, x)| x.clone())
             {
+                tracing::debug!("hopping to child node {}", c_pointer);
+
                 let (mut c_pointer_children, got_handle) =
                     match Self::collect_nodes(handle, c_pointer).await {
                         Ok(v) => v,
