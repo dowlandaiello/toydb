@@ -32,18 +32,18 @@ pub struct LoadPage(pub PageId);
 
 /// A request to load the last page in the heap file.
 #[derive(Message, Debug)]
-#[rtype(result = "Result<Option<(Page, PageId)>, Error>")]
+#[rtype(result = "Result<Option<(Box<Page>, PageId)>, Error>")]
 pub struct LoadHead;
 
 /// A request to create a new page in the heap file.
 #[derive(Message, Debug)]
-#[rtype(result = "Result<(Page, PageId), Error>")]
+#[rtype(result = "Result<(Box<Page>, PageId), Error>")]
 pub struct NewPage;
 
 /// A request to write a page to a heap file.
 #[derive(Message, Debug)]
 #[rtype(result = "Result<(), Error>")]
-pub struct WritePage(pub PageId, pub Page);
+pub struct WritePage(pub PageId, pub Box<Page>);
 
 /// A pool of buffers for databases.
 #[derive(Default, Debug)]
@@ -127,6 +127,8 @@ impl Handler<LoadPage> for DbHandle {
 
         // If the page already exists, return it
         if let Some(Some(page)) = self.pages.get(msg.0) {
+            tracing::debug!("page already in memory");
+
             return Box::pin(future::ready(Ok(page.clone())).into_actor(self));
         };
 
@@ -135,6 +137,8 @@ impl Handler<LoadPage> for DbHandle {
         // Seek to the position in the file that the page is located at
         let read_fut = async move {
             let mut handle = handle_lock.lock().await;
+
+            tracing::debug!("seeking to page position: {}", msg.0 as usize * PAGE_SIZE);
 
             handle
                 .seek(SeekFrom::Start((msg.0 as usize * PAGE_SIZE) as u64))
@@ -165,7 +169,7 @@ impl Handler<LoadPage> for DbHandle {
 }
 
 impl Handler<LoadHead> for DbHandle {
-    type Result = ResponseFuture<Result<Option<(Page, PageId)>, Error>>;
+    type Result = ResponseFuture<Result<Option<(Box<Page>, PageId)>, Error>>;
 
     fn handle(&mut self, _msg: LoadHead, ctx: &mut Context<Self>) -> Self::Result {
         if self.pages.is_empty() {
@@ -180,13 +184,13 @@ impl Handler<LoadHead> for DbHandle {
             addr.send(LoadPage(head_idx))
                 .await
                 .map_err(|e| Error::MailboxError(e))?
-                .map(|page| Some((page, head_idx)))
+                .map(|page| Some((Box::new(page), head_idx)))
         })
     }
 }
 
 impl Handler<NewPage> for DbHandle {
-    type Result = ResponseActFuture<Self, Result<(Page, PageId), Error>>;
+    type Result = ResponseActFuture<Self, Result<(Box<Page>, PageId), Error>>;
 
     #[tracing::instrument]
     fn handle(&mut self, _msg: NewPage, ctx: &mut Context<Self>) -> Self::Result {
@@ -201,14 +205,16 @@ impl Handler<NewPage> for DbHandle {
 
         let addr = ctx.address();
 
+        let alloc_page = Box::new(page);
+
         // Write the new page to the disk
         Box::pin(
             async move {
-                addr.send(WritePage(head_idx, page.clone()))
+                addr.send(WritePage(head_idx, alloc_page.clone()))
                     .map_err(|e| Error::MailboxError(e))
                     .await??;
 
-                Ok((page, head_idx))
+                Ok((alloc_page, head_idx))
             }
             .into_actor(self),
         )
@@ -223,7 +229,7 @@ impl Handler<WritePage> for DbHandle {
         tracing::debug!("writing page");
 
         // Write the page to memory
-        self.pages[msg.0] = Some(msg.1.clone());
+        self.pages[msg.0] = Some(*msg.1.clone());
 
         // TODO: Make this happen in an interval not readily commit
         let handle_lock = self.handle.clone();
@@ -236,7 +242,12 @@ impl Handler<WritePage> for DbHandle {
                 .await
                 .map_err(|e| Error::IoError(e))?;
 
-            let encoded = msg.1.encode_length_delimited_to_vec();
+            let mut encoded = msg.1.encode_length_delimited_to_vec();
+
+            if encoded.len() < PAGE_SIZE {
+                let mut padding = vec![0; PAGE_SIZE - encoded.len()];
+                encoded.append(&mut padding);
+            }
 
             // Write the page
             handle

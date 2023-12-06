@@ -176,7 +176,7 @@ impl Handler<CreateTable> for Engine {
                                 .map(|pks| pks.join("-"))
                                 .and_then(|attr| {
                                     fs::index_file_path_with_name_attr(
-                                        db_name.as_str(),
+                                        table_name.as_str(),
                                         attr.as_str(),
                                     )
                                     .ok()
@@ -200,7 +200,10 @@ impl Handler<CreateTable> for Engine {
                 // Get an index for the primary key
                 if let Some(pks) = &pks {
                     let _ = index_pool
-                        .send(GetIndex(pks.join("-")))
+                        .send(GetIndex(fs::index_name_with_name_attr(
+                            table_name.clone(),
+                            pks.join("-"),
+                        )))
                         .await
                         .map_err(|e| Error::MailboxError(e))?;
                 }
@@ -284,6 +287,12 @@ impl Handler<Insert> for Engine {
                     .filter(|(_, cat)| cat.primary_key)
                     .map(|(i, _)| i)
                     .collect::<Vec<usize>>();
+                let primary_keys_names = cat
+                    .iter()
+                    .enumerate()
+                    .filter(|(_, cat)| cat.primary_key)
+                    .map(|(_, pk)| pk.attr_name.clone())
+                    .collect::<Vec<String>>();
                 let k_values = msg
                     .values
                     .iter()
@@ -296,7 +305,10 @@ impl Handler<Insert> for Engine {
 
                 // Insert into the index
                 let idx = index_pool
-                    .send(GetIndex(msg.table_name))
+                    .send(GetIndex(fs::index_name_with_name_attr(
+                        msg.table_name,
+                        primary_keys_names.join("-"),
+                    )))
                     .await
                     .map_err(|e| Error::MailboxError(e))??;
                 idx.send(InsertKey(composite_key, rid))
@@ -330,11 +342,19 @@ impl Handler<Select> for Engine {
                     .await
                     .map_err(|e| Error::MailboxError(e))??;
 
+                tracing::debug!(
+                    "looking up catalogue entries for table {} in db {}",
+                    &msg.table_name,
+                    &msg.db_name
+                );
+
                 // Look up the table to see if there's an index we can scan over to be more selective
                 let mut cat = catalogue
-                    .send(GetEntries(msg.db_name, msg.table_name.clone()))
+                    .send(GetEntries(msg.db_name.clone(), msg.table_name.clone()))
                     .await
                     .map_err(|e| Error::MailboxError(e))??;
+
+                tracing::debug!("got catalogue entries: {:?}", cat);
 
                 let mut untyped_results: Vec<Tuple> = Vec::new();
 
@@ -343,10 +363,18 @@ impl Handler<Select> for Engine {
                     .and_then(|cat| cat.index_name.as_ref())
                     .and_then(|index_path| fs::index_name_from_file_path(index_path))
                 {
+                    tracing::debug!("obtaining an index to search through database selectively");
+
                     let idx = index_pool
                         .send(GetIndex(index_name))
                         .await
                         .map_err(|e| Error::MailboxError(e))??;
+
+                    tracing::debug!(
+                        "got an index for table {} in db {}",
+                        &msg.table_name,
+                        &msg.db_name
+                    );
 
                     // Get an iterator over the index
                     let iter = idx

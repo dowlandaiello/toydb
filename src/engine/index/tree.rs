@@ -1097,6 +1097,7 @@ impl Handler<Iter> for TreeHandle {
     }
 }
 
+#[derive(Debug)]
 pub struct TreeHandleIterator {
     handle: Addr<TreeHandle>,
     handle_data: Addr<DbHandle>,
@@ -1109,9 +1110,12 @@ impl Actor for TreeHandleIterator {
 }
 
 impl Handler<Next> for TreeHandleIterator {
-    type Result = ResponseFuture<Option<Tuple>>;
+    type Result = ResponseActFuture<Self, Option<Tuple>>;
 
+    #[tracing::instrument]
     fn handle(&mut self, _msg: Next, context: &mut Context<Self>) -> Self::Result {
+        tracing::debug!("obtaining next entry in index");
+
         let handle = self.handle.clone();
         let handle_data = self.handle_data.clone();
         let curr_leaf_node_handle = self.curr_leaf_node.clone();
@@ -1119,42 +1123,47 @@ impl Handler<Next> for TreeHandleIterator {
 
         let addr = context.address();
 
-        Box::pin(async move {
-            let mut curr_leaf_node = curr_leaf_node_handle.lock().await;
-            let mut curr_leaf_idx = curr_leaf_idx.lock().await;
+        Box::pin(
+            async move {
+                let mut curr_leaf_node = curr_leaf_node_handle.lock().await;
+                let mut curr_leaf_idx = curr_leaf_idx.lock().await;
 
-            // Load the next leaf node if we have no leaf node
-            let (mut curr_leaf, mut curr_idx): (BTreeLeafNode, usize) =
-                if let Some(curr) = (curr_leaf_node.clone()).zip(curr_leaf_idx.clone()) {
-                    curr
-                } else {
-                    let node = handle.send(NextLeaf(addr.clone())).await.ok()?.ok()?;
-                    curr_leaf_node.replace(node.clone());
-                    (node, 0)
-                };
+                // Load the next leaf node if we have no leaf node
+                let (mut curr_leaf, mut curr_idx): (BTreeLeafNode, usize) =
+                    if let Some(curr) = (curr_leaf_node.clone()).zip(curr_leaf_idx.clone()) {
+                        curr
+                    } else {
+                        let node = handle.send(NextLeaf(addr.clone())).await.ok()?.ok()?;
+                        curr_leaf_node.replace(node.clone());
+                        (node, 0)
+                    };
 
-            // If we are out of bounds, load a new leaf
-            if curr_idx >= curr_leaf.keys.len() {
-                (curr_leaf, curr_idx) = (handle.send(NextLeaf(addr)).await.ok()?.ok()?, 0);
+                // If we are out of bounds, load a new leaf
+                if curr_idx >= curr_leaf.keys.len() {
+                    (curr_leaf, curr_idx) = (handle.send(NextLeaf(addr)).await.ok()?.ok()?, 0);
+                }
+
+                // Get the next item
+                let rid = &curr_leaf.disk_pointers[curr_idx];
+                curr_leaf_idx.replace(curr_idx + 1);
+
+                tracing::debug!("got iteration RID: {:?}", rid);
+
+                // Load from the heap file
+                let res: Result<Page, Error> = handle_data
+                    .send(LoadPage(rid.page as usize))
+                    .await
+                    .map_err(|e| Error::MailboxError(e))
+                    .ok()?;
+                let page = res.ok()?;
+
+                let tup_bytes = page.data.get(rid.page_idx as usize)?;
+                let tup = Tuple::decode_length_delimited(tup_bytes.data.as_slice()).ok()?;
+
+                Some(tup)
             }
-
-            // Get the next item
-            let rid = &curr_leaf.disk_pointers[curr_idx];
-            curr_leaf_idx.replace(curr_idx + 1);
-
-            // Load from the heap file
-            let res: Result<Page, Error> = handle_data
-                .send(LoadPage(rid.page as usize))
-                .await
-                .map_err(|e| Error::MailboxError(e))
-                .ok()?;
-            let page = res.ok()?;
-
-            let tup_bytes = page.data.get(rid.page_idx as usize)?;
-            let tup = Tuple::decode_length_delimited(tup_bytes.data.as_slice()).ok()?;
-
-            Some(tup)
-        })
+            .into_actor(self),
+        )
     }
 }
 

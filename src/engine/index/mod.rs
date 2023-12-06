@@ -31,7 +31,7 @@ pub struct GetKey(pub u64);
 pub struct InsertKey(pub u64, pub RecordId);
 
 /// A message requesting that an actor create a new iterator.
-#[derive(Message)]
+#[derive(Message, Debug)]
 #[rtype(result = "Result<Addr<TreeHandleIterator>, Error>")]
 pub struct Iter(pub Addr<DbHandle>);
 
@@ -121,11 +121,14 @@ impl Handler<InsertKey> for IndexHandle {
 impl Handler<Iter> for IndexHandle {
     type Result = ResponseActFuture<Self, Result<Addr<TreeHandleIterator>, Error>>;
 
+    #[tracing::instrument]
     fn handle(&mut self, msg: Iter, _ctx: &mut Context<Self>) -> Self::Result {
         let tree_handle = self.tree_handle.clone();
 
         Box::pin(
             async move {
+                tracing::debug!("obtaining tree handle iterator");
+
                 tree_handle
                     .send(msg)
                     .await

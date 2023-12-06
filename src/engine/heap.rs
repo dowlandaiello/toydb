@@ -72,6 +72,7 @@ impl Handler<GetHeap> for HeapPool {
 /// - Insertion of records by RID
 /// - Deletion of records by RID
 /// - Retrieval of records by RID
+#[derive(Debug)]
 pub struct HeapHandle {
     pub buffer: Addr<DbHandle>,
 }
@@ -116,6 +117,7 @@ impl Handler<InsertRecord> for HeapHandle {
 
             // Insert the record
             let idx = page.data.len();
+            page.space_used += msg.0.data.len() as u64;
             page.data.push(msg.0);
             buff.send(WritePage(page_index, page))
                 .await
@@ -130,28 +132,44 @@ impl Handler<InsertRecord> for HeapHandle {
 }
 
 impl Handler<LoadRecord> for HeapHandle {
-    type Result = ResponseFuture<Result<Record, Error>>;
+    type Result = ResponseActFuture<Self, Result<Record, Error>>;
 
+    #[tracing::instrument]
     fn handle(&mut self, msg: LoadRecord, _ctx: &mut Context<Self>) -> Self::Result {
-        let RecordId { page, page_idx } = msg.0;
+        let RecordId {
+            page: page_id,
+            page_idx,
+        } = msg.0;
         let buff = self.buffer.clone();
 
-        Box::pin(async move {
-            // Read the page that the record is in
-            let page = buff
-                .send(LoadPage(page as usize))
-                .await
-                .map_err(|e| Error::MailboxError(e))??;
+        Box::pin(
+            async move {
+                tracing::debug!("fetching page {}", page_id);
 
-            // Load the record from the page
-            let val = page
-                .data
-                .get(page_idx as usize)
-                .ok_or(Error::RecordNotFound)
-                .cloned()?;
+                // Read the page that the record is in
+                let page = buff
+                    .send(LoadPage(page_id as usize))
+                    .await
+                    .map_err(|e| Error::MailboxError(e))??;
 
-            Ok(val)
-        })
+                tracing::debug!(
+                    "fetching record at index {} in page {} = {:?}",
+                    page_idx,
+                    page_id,
+                    page
+                );
+
+                // Load the record from the page
+                let val = page
+                    .data
+                    .get(page_idx as usize)
+                    .ok_or(Error::RecordNotFound)
+                    .cloned()?;
+
+                Ok(val)
+            }
+            .into_actor(self),
+        )
     }
 }
 
@@ -169,6 +187,7 @@ impl Handler<Iter> for HeapHandle {
 }
 
 /// A seeker that can iterate through the tuples in a heap file.
+#[derive(Debug)]
 pub struct HeapHandleIterator {
     handle: Addr<HeapHandle>,
     curr_rid: Arc<Mutex<RecordId>>,
@@ -179,40 +198,51 @@ impl Actor for HeapHandleIterator {
 }
 
 impl Handler<Next> for HeapHandleIterator {
-    type Result = ResponseFuture<Option<Tuple>>;
+    type Result = ResponseActFuture<Self, Option<Tuple>>;
 
+    #[tracing::instrument]
     fn handle(&mut self, _msg: Next, _context: &mut Context<Self>) -> Self::Result {
         let curr_rid_handle = self.curr_rid.clone();
         let handle = self.handle.clone();
 
-        Box::pin(async move {
-            let mut curr_rid = curr_rid_handle.lock().await;
+        Box::pin(
+            async move {
+                let mut curr_rid = curr_rid_handle.lock().await;
 
-            let val = match handle
-                .send(LoadRecord((*curr_rid).clone()))
-                .await
-                .ok()?
-                .ok()
-            {
-                Some(v) => v,
-                None => {
-                    *curr_rid = RecordId {
-                        page: curr_rid.page + 1,
-                        page_idx: 0,
-                    };
+                tracing::debug!("loading record {:?}", curr_rid);
 
-                    handle
-                        .send(LoadRecord((*curr_rid).clone()))
-                        .await
-                        .ok()?
-                        .ok()?
-                }
-            };
+                let val = match handle
+                    .send(LoadRecord((*curr_rid).clone()))
+                    .await
+                    .ok()?
+                    .ok()
+                {
+                    Some(v) => v,
+                    None => {
+                        *curr_rid = RecordId {
+                            page: curr_rid.page + 1,
+                            page_idx: 0,
+                        };
 
-            // Update the current RID
-            curr_rid.page_idx += 1;
+                        tracing::debug!("loading record {:?}", curr_rid);
 
-            Some(Tuple::decode_length_delimited(val.data.as_slice()).ok()?)
-        })
+                        handle
+                            .send(LoadRecord((*curr_rid).clone()))
+                            .await
+                            .ok()?
+                            .ok()?
+                    }
+                };
+
+                // Update the current RID
+                curr_rid.page_idx += 1;
+
+                let tup = Tuple::decode_length_delimited(val.data.as_slice()).ok()?;
+                tracing::debug!("decoded tuple {:?}", tup);
+
+                Some(tup)
+            }
+            .into_actor(self),
+        )
     }
 }

@@ -44,7 +44,11 @@ pub fn index_file_path_with_name_attr(
     name: impl Display,
     attr: impl Display,
 ) -> Result<PathBuf, Error> {
-    path_in_data_dir(format!("{}_{}.idx", name, attr))
+    path_in_data_dir(format!("{}.idx", index_name_with_name_attr(name, attr)))
+}
+
+pub fn index_name_with_name_attr(name: impl Display, attr: impl Display) -> String {
+    format!("{}_{}", name, attr)
 }
 
 /// Checks whether or not the file is empty.

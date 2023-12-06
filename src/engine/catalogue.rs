@@ -144,6 +144,7 @@ impl Handler<GetEntry> for Catalogue {
 impl Handler<GetEntries> for Catalogue {
     type Result = ResponseActFuture<Self, Result<Vec<CatalogueEntry>, Error>>;
 
+    #[tracing::instrument]
     fn handle(&mut self, msg: GetEntries, _ctx: &mut Context<Self>) -> Self::Result {
         let db_handle = self.db_handle.clone();
 
@@ -169,8 +170,12 @@ impl Handler<GetEntries> for Catalogue {
                         break;
                     };
 
+                    tracing::debug!("got tuple in catalogue scan: {:?}", tup);
+
                     // Check if this value has the same table and database
                     let cat = CatalogueEntry::try_from(tup)?;
+
+                    tracing::debug!("decoded tuple into: {:?}", cat);
 
                     if cat.table_name == msg.1
                         && fs::db_name_from_file_path(&cat.file_name)
@@ -185,6 +190,12 @@ impl Handler<GetEntries> for Catalogue {
                         .await
                         .map_err(|e| Error::MailboxError(e))?;
                 }
+
+                tracing::debug!(
+                    "got catalogue entries for table {} in db {}",
+                    &msg.1,
+                    &msg.0
+                );
 
                 Ok(results)
             }
