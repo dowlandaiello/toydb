@@ -65,14 +65,14 @@ pub fn into_primary_key(
 pub struct TypedTuple(pub Vec<Value>);
 
 /// A typed value.
-#[derive(Serialize, Deserialize, Debug)]
+#[derive(Serialize, Deserialize, Debug, PartialEq, PartialOrd, Clone)]
 pub enum Value {
     String(String),
     Integer(i64),
 }
 
 /// A type of a value in a column in a table.
-#[derive(Serialize, Deserialize, Debug)]
+#[derive(Serialize, Deserialize, Debug, Clone)]
 pub enum Ty {
     String,
     Integer,
@@ -108,7 +108,7 @@ impl From<Ty> for Vec<u8> {
 }
 
 /// A logical representation of a tuple as a catalogue.
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub struct CatalogueEntry {
     pub table_name: String,
     pub file_name: String,

@@ -10,7 +10,7 @@ use buffer_pool::{BufferPool, DbHandle, GetBuffer};
 use catalogue::{Catalogue, GetEntries, GetEntry, InsertEntry};
 use cmd::{
     ddl::{CreateDatabase, CreateTable},
-    dml::{Insert, Project, Select},
+    dml::{Cmp, Comparator, Insert, Project, Select},
 };
 use heap::{GetHeap, HeapHandle, HeapPool, InsertRecord, Iter as HeapIter};
 use index::{GetIndex, IndexPool, InsertKey, Iter};
@@ -447,6 +447,12 @@ impl Handler<Select> for Engine {
                     }
                 };
 
+                let cat_attrs = cat
+                    .clone()
+                    .into_iter()
+                    .map(|ent| ent.attr_name)
+                    .collect::<Vec<String>>();
+
                 for tup in untyped_results {
                     let mut row: Vec<Value> = Vec::new();
 
@@ -454,7 +460,15 @@ impl Handler<Select> for Engine {
                         row.push(conv(elem, i)?);
                     }
 
-                    typed_results.push(TypedTuple(row));
+                    if let Some(cmp) = &msg.filter {
+                        let tup = TypedTuple(row);
+
+                        if cmp.has_value(&tup, &cat_attrs) {
+                            typed_results.push(tup);
+                        }
+                    } else {
+                        typed_results.push(TypedTuple(row));
+                    }
                 }
 
                 tracing::info!(

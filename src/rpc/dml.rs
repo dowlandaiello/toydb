@@ -1,6 +1,6 @@
 use super::super::{
     engine::{
-        cmd::dml::{Insert, Project, Select},
+        cmd::dml::{Cmp, Insert, Project, Select},
         Engine,
     },
     error::Error,
@@ -56,6 +56,7 @@ pub async fn insert(data: Data<Addr<Engine>>, params: Params<InsertReq>) -> Resu
 pub struct SelectReq {
     db_name: String,
     table_name: String,
+    filter: Option<Cmp>,
 }
 
 pub async fn select(
@@ -65,11 +66,13 @@ pub async fn select(
     let SelectReq {
         db_name,
         table_name,
+        filter,
     } = params.0;
 
     data.send(Select {
         db_name,
         table_name,
+        filter,
     })
     .await
     .map_err(|e| Error::MailboxError(e))?
