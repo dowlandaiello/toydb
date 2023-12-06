@@ -1,6 +1,6 @@
 use super::super::{
     engine::{
-        cmd::dml::{Insert, Select},
+        cmd::dml::{Insert, Project, Select},
         Engine,
     },
     error::Error,
@@ -70,6 +70,35 @@ pub async fn select(
     data.send(Select {
         db_name,
         table_name,
+    })
+    .await
+    .map_err(|e| Error::MailboxError(e))?
+}
+
+#[derive(Serialize, Deserialize)]
+pub struct ProjectReq {
+    db_name: String,
+    table_name: String,
+    input: Vec<TypedTuple>,
+    columns: Vec<String>,
+}
+
+pub async fn project(
+    data: Data<Addr<Engine>>,
+    params: Params<ProjectReq>,
+) -> Result<Vec<TypedTuple>, Error> {
+    let ProjectReq {
+        db_name,
+        table_name,
+        input,
+        columns,
+    } = params.0;
+
+    data.send(Project {
+        db_name,
+        table_name,
+        input,
+        columns,
     })
     .await
     .map_err(|e| Error::MailboxError(e))?

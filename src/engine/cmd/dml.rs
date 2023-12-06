@@ -23,3 +23,13 @@ pub struct Select {
     pub(crate) db_name: DbName,
     pub(crate) table_name: TableName,
 }
+
+/// A message issued to the engine requesting that specific columns in a table be retrieved.
+#[derive(Message, Debug)]
+#[rtype(result = "Result<Vec<TypedTuple>, Error>")]
+pub struct Project {
+    pub(crate) db_name: DbName,
+    pub(crate) table_name: TableName,
+    pub(crate) input: Vec<TypedTuple>,
+    pub(crate) columns: Vec<String>,
+}

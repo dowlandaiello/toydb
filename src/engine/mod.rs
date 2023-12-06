@@ -7,10 +7,10 @@ use super::{
     util::fs,
 };
 use buffer_pool::{BufferPool, DbHandle, GetBuffer};
-use catalogue::{Catalogue, GetEntries, InsertEntry};
+use catalogue::{Catalogue, GetEntries, GetEntry, InsertEntry};
 use cmd::{
     ddl::{CreateDatabase, CreateTable},
-    dml::{Insert, Select},
+    dml::{Insert, Project, Select},
 };
 use heap::{GetHeap, HeapHandle, HeapPool, InsertRecord, Iter as HeapIter};
 use index::{GetIndex, IndexPool, InsertKey, Iter};
@@ -18,7 +18,7 @@ use iterator::Next;
 
 use actix::{Actor, Addr, Context, Handler, ResponseActFuture, WrapFuture};
 use prost::Message;
-use std::mem;
+use std::{collections::HashSet, mem};
 use tokio::fs::OpenOptions;
 
 pub mod buffer_pool;
@@ -465,6 +465,53 @@ impl Handler<Select> for Engine {
                 );
 
                 Ok(typed_results)
+            }
+            .into_actor(self),
+        )
+    }
+}
+
+impl Handler<Project> for Engine {
+    type Result = ResponseActFuture<Self, Result<Vec<TypedTuple>, Error>>;
+
+    #[tracing::instrument]
+    fn handle(&mut self, msg: Project, _ctx: &mut Context<Self>) -> Self::Result {
+        tracing::info!("projecting {} tuples", msg.input.len());
+
+        let catalogue = self.catalogue.clone();
+
+        Box::pin(
+            async move {
+                // Get only catalogue entries for columns we want to keep
+                let mut include_indices: HashSet<usize> = HashSet::new();
+
+                for col_name in msg.columns.into_iter() {
+                    let ent = catalogue
+                        .send(GetEntry(
+                            msg.db_name.clone(),
+                            msg.table_name.clone(),
+                            col_name,
+                        ))
+                        .await
+                        .map_err(|e| Error::MailboxError(e))??;
+
+                    include_indices.insert(ent.attr_index);
+                }
+
+                Ok(msg
+                    .input
+                    .into_iter()
+                    .map(|row| {
+                        TypedTuple(
+                            row.0
+                                .into_iter()
+                                .enumerate()
+                                .filter(|(i, _)| include_indices.contains(i))
+                                .map(|(_, val)| val)
+                                .collect::<Vec<Value>>(),
+                        )
+                    })
+                    .collect::<Vec<TypedTuple>>())
             }
             .into_actor(self),
         )
