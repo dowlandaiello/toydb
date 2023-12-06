@@ -5,7 +5,7 @@ use toydb::{
     engine::Engine,
     rpc::{
         ddl::{create_database, create_table},
-        dml::insert,
+        dml::{insert, select},
     },
 };
 
@@ -19,6 +19,7 @@ async fn main() -> IoResult<()> {
         .with_method("create_database", create_database)
         .with_method("create_table", create_table)
         .with_method("insert", insert)
+        .with_method("select", select)
         .finish();
 
     HttpServer::new(move || {

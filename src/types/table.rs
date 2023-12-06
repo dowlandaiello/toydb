@@ -61,9 +61,11 @@ pub fn into_primary_key(
 }
 
 /// A typed tuple.
+#[derive(Serialize, Deserialize, Debug)]
 pub struct TypedTuple(pub Vec<Value>);
 
 /// A typed value.
+#[derive(Serialize, Deserialize, Debug)]
 pub enum Value {
     String(String),
     Integer(i64),

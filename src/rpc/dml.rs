@@ -1,6 +1,10 @@
 use super::super::{
-    engine::{cmd::dml::Insert, Engine},
+    engine::{
+        cmd::dml::{Insert, Select},
+        Engine,
+    },
     error::Error,
+    types::table::TypedTuple,
 };
 use actix::Addr;
 use jsonrpc_v2::{Data, Params};
@@ -46,4 +50,27 @@ pub async fn insert(data: Data<Addr<Engine>>, params: Params<InsertReq>) -> Resu
     .map_err(|e| Error::MailboxError(e))??;
 
     Ok(())
+}
+
+#[derive(Serialize, Deserialize)]
+pub struct SelectReq {
+    db_name: String,
+    table_name: String,
+}
+
+pub async fn select(
+    data: Data<Addr<Engine>>,
+    params: Params<SelectReq>,
+) -> Result<Vec<TypedTuple>, Error> {
+    let SelectReq {
+        db_name,
+        table_name,
+    } = params.0;
+
+    data.send(Select {
+        db_name,
+        table_name,
+    })
+    .await
+    .map_err(|e| Error::MailboxError(e))?
 }
