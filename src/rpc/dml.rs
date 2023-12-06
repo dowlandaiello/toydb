@@ -4,7 +4,7 @@ use super::super::{
         Engine,
     },
     error::Error,
-    types::table::TypedTuple,
+    types::table::LabeledTypedTuple,
 };
 use actix::Addr;
 use jsonrpc_v2::{Data, Params};
@@ -62,7 +62,7 @@ pub struct SelectReq {
 pub async fn select(
     data: Data<Addr<Engine>>,
     params: Params<SelectReq>,
-) -> Result<Vec<TypedTuple>, Error> {
+) -> Result<Vec<LabeledTypedTuple>, Error> {
     let SelectReq {
         db_name,
         table_name,
@@ -82,14 +82,14 @@ pub async fn select(
 pub struct ProjectReq {
     db_name: String,
     table_name: String,
-    input: Vec<TypedTuple>,
+    input: Vec<LabeledTypedTuple>,
     columns: Vec<String>,
 }
 
 pub async fn project(
     data: Data<Addr<Engine>>,
     params: Params<ProjectReq>,
-) -> Result<Vec<TypedTuple>, Error> {
+) -> Result<Vec<LabeledTypedTuple>, Error> {
     let ProjectReq {
         db_name,
         table_name,

@@ -2,7 +2,7 @@ use super::super::super::{
     error::Error,
     types::{
         db::DbName,
-        table::{TableName, TypedTuple, Value},
+        table::{LabeledTypedTuple, TableName, Value},
     },
 };
 use actix::Message;
@@ -28,11 +28,11 @@ pub enum Cmp {
 
 impl Cmp {
     /// Returns whether or not the value falls under the comparison clause.
-    pub fn has_value(&self, tup: &TypedTuple, attr_names: impl AsRef<[String]>) -> bool {
+    pub fn has_value(&self, tup: &LabeledTypedTuple, attr_names: impl AsRef<[String]>) -> bool {
         self.helper(tup, attr_names).unwrap_or_default()
     }
 
-    fn helper(&self, tup: &TypedTuple, attr_names: impl AsRef<[String]>) -> Option<bool> {
+    fn helper(&self, tup: &LabeledTypedTuple, attr_names: impl AsRef<[String]>) -> Option<bool> {
         match self {
             Self::Eq(a, b) => {
                 let a_val = a.to_value_for(tup, attr_names.as_ref())?;
@@ -70,7 +70,11 @@ pub enum Comparator {
 }
 
 impl Comparator {
-    fn to_value_for(&self, tup: &TypedTuple, attr_names: impl AsRef<[String]>) -> Option<Value> {
+    fn to_value_for(
+        &self,
+        tup: &LabeledTypedTuple,
+        attr_names: impl AsRef<[String]>,
+    ) -> Option<Value> {
         match self {
             Self::Col(c) => tup
                 .0
@@ -78,7 +82,7 @@ impl Comparator {
                 .into_iter()
                 .zip(attr_names.as_ref().iter())
                 .find(|(_, name)| name.as_str() == c.as_str())
-                .map(|(val, _)| val),
+                .map(|(val, _)| val.1),
             Self::Val(v) => Some(v.clone()),
         }
     }
@@ -86,7 +90,7 @@ impl Comparator {
 
 /// A message issued to the engine requesting that a table be retrieved.
 #[derive(Message, Debug)]
-#[rtype(result = "Result<Vec<TypedTuple>, Error>")]
+#[rtype(result = "Result<Vec<LabeledTypedTuple>, Error>")]
 pub struct Select {
     pub(crate) db_name: DbName,
     pub(crate) table_name: TableName,
@@ -95,10 +99,17 @@ pub struct Select {
 
 /// A message issued to the engine requesting that specific columns in a table be retrieved.
 #[derive(Message, Debug)]
-#[rtype(result = "Result<Vec<TypedTuple>, Error>")]
+#[rtype(result = "Result<Vec<LabeledTypedTuple>, Error>")]
 pub struct Project {
     pub(crate) db_name: DbName,
     pub(crate) table_name: TableName,
-    pub(crate) input: Vec<TypedTuple>,
+    pub(crate) input: Vec<LabeledTypedTuple>,
     pub(crate) columns: Vec<String>,
+}
+
+/// A message issued to the engine requesting that combines two tables on their matching column names.
+pub struct NaturalJoin {
+    pub(crate) db_name: DbName,
+    pub(crate) input_1: Vec<LabeledTypedTuple>,
+    pub(crate) input_2: Vec<LabeledTypedTuple>,
 }

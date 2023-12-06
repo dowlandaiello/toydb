@@ -3,7 +3,7 @@ use crate::util::rid;
 use super::{
     error::Error,
     items::{Element, Record, Tuple},
-    types::table::{self, CatalogueEntry, Ty, TypedTuple, Value},
+    types::table::{self, CatalogueEntry, LabeledTypedTuple, Ty, TypedTuple, Value},
     util::fs,
 };
 use buffer_pool::{BufferPool, DbHandle, GetBuffer};
@@ -323,7 +323,7 @@ impl Handler<Insert> for Engine {
 }
 
 impl Handler<Select> for Engine {
-    type Result = ResponseActFuture<Self, Result<Vec<TypedTuple>, Error>>;
+    type Result = ResponseActFuture<Self, Result<Vec<LabeledTypedTuple>, Error>>;
 
     fn handle(&mut self, msg: Select, _ctx: &mut Context<Self>) -> Self::Result {
         let heap_pool = self.heap_pool.clone();
@@ -426,7 +426,7 @@ impl Handler<Select> for Engine {
                 }
 
                 // Convert all the untyped results into typed results
-                let mut typed_results: Vec<TypedTuple> = Vec::new();
+                let mut typed_results: Vec<LabeledTypedTuple> = Vec::new();
 
                 // Generate functions for converting each column
                 cat.sort_by_key(|x| x.attr_index);
@@ -453,21 +453,21 @@ impl Handler<Select> for Engine {
                     .map(|ent| ent.attr_name)
                     .collect::<Vec<String>>();
 
-                for tup in untyped_results {
-                    let mut row: Vec<Value> = Vec::new();
+                for (i, tup) in untyped_results.into_iter().enumerate() {
+                    let mut row: Vec<(String, Value)> = Vec::new();
 
-                    for (i, elem) in tup.elements.into_iter().enumerate() {
-                        row.push(conv(elem, i)?);
+                    for (j, elem) in tup.elements.into_iter().enumerate() {
+                        row.push((cat_attrs[j].clone(), conv(elem, j)?));
                     }
 
                     if let Some(cmp) = &msg.filter {
-                        let tup = TypedTuple(row);
+                        let tup = LabeledTypedTuple(row);
 
                         if cmp.has_value(&tup, &cat_attrs) {
                             typed_results.push(tup);
                         }
                     } else {
-                        typed_results.push(TypedTuple(row));
+                        typed_results.push(LabeledTypedTuple(row));
                     }
                 }
 
@@ -486,7 +486,7 @@ impl Handler<Select> for Engine {
 }
 
 impl Handler<Project> for Engine {
-    type Result = ResponseActFuture<Self, Result<Vec<TypedTuple>, Error>>;
+    type Result = ResponseActFuture<Self, Result<Vec<LabeledTypedTuple>, Error>>;
 
     #[tracing::instrument]
     fn handle(&mut self, msg: Project, _ctx: &mut Context<Self>) -> Self::Result {
@@ -496,36 +496,18 @@ impl Handler<Project> for Engine {
 
         Box::pin(
             async move {
-                // Get only catalogue entries for columns we want to keep
-                let mut include_indices: HashSet<usize> = HashSet::new();
-
-                for col_name in msg.columns.into_iter() {
-                    let ent = catalogue
-                        .send(GetEntry(
-                            msg.db_name.clone(),
-                            msg.table_name.clone(),
-                            col_name,
-                        ))
-                        .await
-                        .map_err(|e| Error::MailboxError(e))??;
-
-                    include_indices.insert(ent.attr_index);
-                }
-
                 Ok(msg
                     .input
                     .into_iter()
                     .map(|row| {
-                        TypedTuple(
+                        LabeledTypedTuple(
                             row.0
                                 .into_iter()
-                                .enumerate()
-                                .filter(|(i, _)| include_indices.contains(i))
-                                .map(|(_, val)| val)
-                                .collect::<Vec<Value>>(),
+                                .filter(|(name, _)| msg.columns.contains(name))
+                                .collect::<Vec<(String, Value)>>(),
                         )
                     })
-                    .collect::<Vec<TypedTuple>>())
+                    .collect::<Vec<LabeledTypedTuple>>())
             }
             .into_actor(self),
         )
