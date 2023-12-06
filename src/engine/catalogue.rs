@@ -8,8 +8,9 @@ use super::{
         },
         util::{fs, rid},
     },
-    heap::{HeapHandle, InsertRecord, LoadRecord},
+    heap::{HeapHandle, InsertRecord, Iter, LoadRecord},
     index::{GetKey, IndexHandle, InsertKey},
+    iterator::Next,
 };
 use actix::{Actor, Addr, Context, Handler, Message, ResponseActFuture, WrapFuture};
 use prost::Message as ProstMessage;
@@ -24,7 +25,7 @@ pub struct InsertEntry(pub CatalogueEntry);
 #[rtype(result = "Result<CatalogueEntry, Error>")]
 pub struct GetEntry(pub DbName, pub TableName, pub String);
 
-/// Gets all catalogue entries for the given table in the given database.
+/// Gets all of the catalogue entries for the table in the specified database.
 #[derive(Message, Debug)]
 #[rtype(result = "Result<Vec<CatalogueEntry>, Error>")]
 pub struct GetEntries(pub DbName, pub TableName);
@@ -134,6 +135,58 @@ impl Handler<GetEntry> for Catalogue {
                 let tup = Tuple::decode_length_delimited(record.data.as_slice())
                     .map_err(|e| Error::DecodeError(e))?;
                 tup.try_into()
+            }
+            .into_actor(self),
+        )
+    }
+}
+
+impl Handler<GetEntries> for Catalogue {
+    type Result = ResponseActFuture<Self, Result<Vec<CatalogueEntry>, Error>>;
+
+    fn handle(&mut self, msg: GetEntries, _ctx: &mut Context<Self>) -> Self::Result {
+        let db_handle = self.db_handle.clone();
+
+        Box::pin(
+            async move {
+                // Use the iterator interface to find matching values
+                let iterator = db_handle
+                    .send(Iter)
+                    .await
+                    .map_err(|e| Error::MailboxError(e))?;
+                let mut next = iterator
+                    .send(Next)
+                    .await
+                    .map_err(|e| Error::MailboxError(e))?;
+
+                let mut results = Vec::new();
+
+                loop {
+                    // Once there are no more tuples, stop
+                    let tup = if let Some(tup) = next {
+                        tup
+                    } else {
+                        break;
+                    };
+
+                    // Check if this value has the same table and database
+                    let cat = CatalogueEntry::try_from(tup)?;
+
+                    if cat.table_name == msg.1
+                        && fs::db_name_from_file_path(&cat.file_name)
+                            .map(|dbname| msg.0 == dbname)
+                            .unwrap_or_default()
+                    {
+                        results.push(cat);
+                    }
+
+                    next = iterator
+                        .send(Next)
+                        .await
+                        .map_err(|e| Error::MailboxError(e))?;
+                }
+
+                todo!()
             }
             .into_actor(self),
         )

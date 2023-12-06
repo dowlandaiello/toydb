@@ -1,3 +1,5 @@
+use crate::util::rid;
+
 use super::{
     error::Error,
     items::{Element, Record, Tuple},
@@ -5,13 +7,13 @@ use super::{
     util::fs,
 };
 use buffer_pool::{BufferPool, DbHandle, GetBuffer};
-use catalogue::{Catalogue, InsertEntry};
+use catalogue::{Catalogue, GetEntries, InsertEntry};
 use cmd::{
     ddl::{CreateDatabase, CreateTable},
     dml::Insert,
 };
 use heap::{GetHeap, HeapHandle, HeapPool, InsertRecord};
-use index::{GetIndex, IndexPool};
+use index::{GetIndex, IndexPool, InsertKey};
 
 use actix::{Actor, Addr, Context, Handler, ResponseActFuture, WrapFuture};
 use prost::Message;
@@ -212,12 +214,14 @@ impl Handler<Insert> for Engine {
         let tuple = Tuple {
             elements: msg
                 .values
-                .into_iter()
-                .map(|elem| Element { data: elem })
+                .iter()
+                .map(|elem| Element { data: elem.clone() })
                 .collect::<Vec<Element>>(),
         };
         let buffer_pool = self.buffer_pool.clone();
         let heap_pool = self.heap_pool.clone();
+        let catalogue = self.catalogue.clone();
+        let index_pool = self.index_pool.clone();
 
         tracing::info!(
             "inserting tuple {:?} into table {} in database {}",
@@ -235,12 +239,12 @@ impl Handler<Insert> for Engine {
                     .await
                     .map_err(|e| Error::MailboxError(e))??;
                 let heap_handle = heap_pool
-                    .send(GetHeap(msg.db_name, db_handle))
+                    .send(GetHeap(msg.db_name.clone(), db_handle))
                     .await
                     .map_err(|e| Error::MailboxError(e))??;
 
                 // Insert the tuple into the heap
-                heap_handle
+                let rid = heap_handle
                     .send(InsertRecord(Record {
                         size: tuple_enc.len() as u64,
                         data: tuple_enc,
@@ -248,7 +252,41 @@ impl Handler<Insert> for Engine {
                     .await
                     .map_err(|e| Error::MailboxError(e))??;
 
+                tracing::debug!("successfully inserted tuple into the heap");
+
                 // Check the catalogue to see if there is a primary key for this table
+                if let Ok(cat) = catalogue
+                    .send(GetEntries(msg.db_name, msg.table_name.clone()))
+                    .await
+                    .map_err(|e| Error::MailboxError(e))?
+                {
+                    // There are primary keys, so let's find them and make a composite key
+                    // of them
+                    let primary_keys = cat
+                        .iter()
+                        .enumerate()
+                        .filter(|(_, cat)| cat.primary_key)
+                        .map(|(i, _)| i)
+                        .collect::<Vec<usize>>();
+                    let k_values = msg
+                        .values
+                        .iter()
+                        .enumerate()
+                        .filter(|(i, _)| primary_keys.contains(i))
+                        .map(|(_, value)| value.clone())
+                        .collect::<Vec<Vec<u8>>>();
+
+                    let composite_key = rid::key_for_composite_key(k_values);
+
+                    // Insert into the index
+                    let idx = index_pool
+                        .send(GetIndex(msg.table_name))
+                        .await
+                        .map_err(|e| Error::MailboxError(e))??;
+                    idx.send(InsertKey(composite_key, rid))
+                        .await
+                        .map_err(|e| Error::MailboxError(e))??;
+                }
 
                 Ok(())
             }
