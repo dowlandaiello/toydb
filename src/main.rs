@@ -3,7 +3,10 @@ use jsonrpc_v2::{Data, Server};
 use std::io::Result as IoResult;
 use toydb::{
     engine::Engine,
-    rpc::ddl::{create_database, create_table},
+    rpc::{
+        ddl::{create_database, create_table},
+        dml::insert,
+    },
 };
 
 #[actix_rt::main]
@@ -15,6 +18,7 @@ async fn main() -> IoResult<()> {
         .with_data(Data::new(engine))
         .with_method("create_database", create_database)
         .with_method("create_table", create_table)
+        .with_method("insert", insert)
         .finish();
 
     HttpServer::new(move || {

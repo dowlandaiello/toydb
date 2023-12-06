@@ -186,7 +186,7 @@ impl Handler<GetEntries> for Catalogue {
                         .map_err(|e| Error::MailboxError(e))?;
                 }
 
-                todo!()
+                Ok(results)
             }
             .into_actor(self),
         )

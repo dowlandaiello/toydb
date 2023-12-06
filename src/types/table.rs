@@ -111,8 +111,9 @@ pub struct CatalogueEntry {
 impl TryFrom<Tuple> for CatalogueEntry {
     type Error = Error;
 
+    #[tracing::instrument]
     fn try_from(mut tup: Tuple) -> Result<Self, Error> {
-        if tup.elements.len() < 4 {
+        if tup.elements.len() < 6 {
             return Err(Error::MiscDecodeError);
         }
 
@@ -125,10 +126,7 @@ impl TryFrom<Tuple> for CatalogueEntry {
             if data.len() == 0 {
                 None
             } else {
-                Some(
-                    String::from_utf8(tup.elements.remove(0).data)
-                        .map_err(|_| Error::MiscDecodeError)?,
-                )
+                Some(String::from_utf8(data).map_err(|_| Error::MiscDecodeError)?)
             }
         };
         let attr_name =
