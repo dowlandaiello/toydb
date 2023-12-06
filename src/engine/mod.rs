@@ -393,6 +393,8 @@ impl Handler<Select> for Engine {
                             break;
                         };
 
+                        tracing::debug!("got index entry {:?}", n);
+
                         untyped_results.push(n);
 
                         next = iter.send(Next).await.map_err(|e| Error::MailboxError(e))?;

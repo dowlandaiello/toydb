@@ -609,7 +609,8 @@ impl TreeHandle {
                 .keys_pointers
                 .iter()
                 .enumerate()
-                .filter(|(i, _)| i % 2 != 0)
+                .filter(|(i, _)| i % 2 == 0)
+                .filter(|(_, ptr)| **ptr != 0)
                 .map(|(_, x)| x.clone())
             {
                 tracing::debug!("hopping to child node {}", c_pointer);
@@ -1064,6 +1065,13 @@ impl Handler<NextLeaf> for TreeHandle {
 
             // If there are no locations left to go back to, we are done
             let seeker_progress = seekers.get_mut(&msg.0).ok_or(Error::TraversalError)?;
+
+            if seeker_progress.len() == 0 {
+                return Err(Error::TraversalError);
+            }
+
+            tracing::debug!("making progress on {:?}", seeker_progress);
+
             let next_node = seeker_progress.remove(0);
 
             Ok(next_node)
@@ -1148,12 +1156,21 @@ impl Handler<Next> for TreeHandleIterator {
 
                 // If we are out of bounds, load a new leaf
                 if curr_idx >= curr_leaf.keys.len() {
-                    (curr_leaf, curr_idx) = (handle.send(NextLeaf(addr)).await.ok()?.ok()?, 0);
+                    (curr_leaf, curr_idx) =
+                        (handle.send(NextLeaf(addr.clone())).await.ok()?.ok()?, 0);
                 }
 
                 // Get the next item
-                let rid = &curr_leaf.disk_pointers[curr_idx];
+                let mut rid = &curr_leaf.disk_pointers[curr_idx];
+
                 curr_leaf_idx.replace(curr_idx + 1);
+
+                // We need to keep advancing if the RID is empty
+                if rid.is_empty {
+                    (curr_leaf, curr_idx) = (handle.send(NextLeaf(addr)).await.ok()?.ok()?, 0);
+                    curr_leaf_idx.replace(curr_idx + 1);
+                    rid = &curr_leaf.disk_pointers[curr_idx];
+                }
 
                 tracing::debug!("got iteration RID: {:?}", rid);
 
