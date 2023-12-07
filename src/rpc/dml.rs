@@ -80,8 +80,6 @@ pub async fn select(
 
 #[derive(Serialize, Deserialize)]
 pub struct ProjectReq {
-    db_name: String,
-    table_name: String,
     input: Vec<LabeledTypedTuple>,
     columns: Vec<String>,
 }
@@ -90,19 +88,9 @@ pub async fn project(
     data: Data<Addr<Engine>>,
     params: Params<ProjectReq>,
 ) -> Result<Vec<LabeledTypedTuple>, Error> {
-    let ProjectReq {
-        db_name,
-        table_name,
-        input,
-        columns,
-    } = params.0;
+    let ProjectReq { input, columns } = params.0;
 
-    data.send(Project {
-        db_name,
-        table_name,
-        input,
-        columns,
-    })
-    .await
-    .map_err(|e| Error::MailboxError(e))?
+    data.send(Project { input, columns })
+        .await
+        .map_err(|e| Error::MailboxError(e))?
 }

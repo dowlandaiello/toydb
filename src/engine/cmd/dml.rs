@@ -101,15 +101,15 @@ pub struct Select {
 #[derive(Message, Debug)]
 #[rtype(result = "Result<Vec<LabeledTypedTuple>, Error>")]
 pub struct Project {
-    pub(crate) db_name: DbName,
-    pub(crate) table_name: TableName,
     pub(crate) input: Vec<LabeledTypedTuple>,
     pub(crate) columns: Vec<String>,
 }
 
 /// A message issued to the engine requesting that combines two tables on their matching column names.
-pub struct NaturalJoin {
-    pub(crate) db_name: DbName,
+#[derive(Message, Debug)]
+#[rtype(result = "Result<Vec<LabeledTypedTuple>, Error>")]
+pub struct Join {
     pub(crate) input_1: Vec<LabeledTypedTuple>,
     pub(crate) input_2: Vec<LabeledTypedTuple>,
+    pub(crate) cond: Cmp,
 }

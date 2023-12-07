@@ -21,6 +21,8 @@ pub enum Error {
     InvalidKey,
     MultiplePrimaryKeyClauses,
     MissingCatalogueEntry,
+    InvalidCondition,
+    JoinColumnNotFound,
 }
 
 impl From<IoError> for Error {
@@ -52,6 +54,8 @@ impl fmt::Display for Error {
                 write!(f, "the query included multiple primary key clauses")
             }
             Self::MissingCatalogueEntry => write!(f, "missing catalogue entry"),
+            Self::InvalidCondition => write!(f, "invalid condition"),
+            Self::JoinColumnNotFound => write!(f, "join column not found"),
         }
     }
 }
@@ -72,7 +76,9 @@ impl StdError for Error {
             | Self::MiscDecodeError
             | Self::InvalidKey
             | Self::MultiplePrimaryKeyClauses
-            | Self::MissingCatalogueEntry => None,
+            | Self::MissingCatalogueEntry
+            | Self::InvalidCondition
+            | Self::JoinColumnNotFound => None,
         }
     }
 }
@@ -94,6 +100,8 @@ impl ErrorLike for Error {
             Self::InvalidKey => 11,
             Self::MultiplePrimaryKeyClauses => 12,
             Self::MissingCatalogueEntry => 13,
+            Self::InvalidCondition => 14,
+            Self::JoinColumnNotFound => 15,
         }
     }
 }
