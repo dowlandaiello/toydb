@@ -9,13 +9,19 @@ use super::super::{
     DbHandle,
 };
 use actix::{Addr, Message};
-use sqlparser::ast::{ColumnDef, ObjectName, TableConstraint};
+use sqlparser::ast::{ColumnDef, ColumnOption, ObjectName, TableConstraint};
 
 /// A message issued to the engine requesting that a new database be created.
 /// Returns the handle to the database if the database already exists.
 #[derive(Message, Debug)]
 #[rtype(result = "Result<Addr<DbHandle>, Error>")]
 pub struct CreateDatabase(pub(crate) DbName);
+
+impl CreateDatabase {
+    pub fn from_sql(mut db_name: ObjectName) -> Self {
+        Self(db_name.0.remove(0).value)
+    }
+}
 
 /// A message issued to the engine requesting that a new table be created in
 /// a database. Returns an error if the operation failed.
@@ -29,26 +35,44 @@ pub struct CreateTable {
 }
 
 impl CreateTable {
-    pub fn from_sql(
+    pub fn try_from_sql(
         db_name: DbName,
         mut name: ObjectName,
         columns: Vec<ColumnDef>,
         constraints: Vec<TableConstraint>,
-    ) -> Self {
+    ) -> Result<Self, Error> {
+        let mut allowed_constraints = columns
+            .iter()
+            .map(|col| {
+                col.options
+                    .iter()
+                    .map(|opt| match &opt.option {
+                        ColumnOption::Unique { is_primary: true } => {
+                            Ok(Constraint::PrimaryKey(vec![col.name.value.clone()]))
+                        }
+                        o => Err(Error::Unimplemented(Some(format!("{:?}", o.clone())))),
+                    })
+                    .collect::<Result<Vec<Constraint>, Error>>()
+            })
+            .collect::<Result<Vec<Vec<Constraint>>, Error>>()?
+            .concat();
+
         let typed_cols = columns
             .into_iter()
             .map(|def| (def.name.value, def.data_type.into()))
             .collect::<Vec<(String, Ty)>>();
-        let allowed_constraints = constraints
+
+        let mut constraint_clause_constraints = constraints
             .into_iter()
             .filter_map(|constr| constr.try_into().ok())
             .collect::<Vec<Constraint>>();
+        allowed_constraints.append(&mut constraint_clause_constraints);
 
-        Self {
+        Ok(Self {
             db_name,
             table_name: name.0.remove(0).value,
             columns: typed_cols,
             constraints: allowed_constraints,
-        }
+        })
     }
 }

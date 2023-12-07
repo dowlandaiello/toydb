@@ -599,8 +599,12 @@ impl Handler<Rename> for Engine {
 impl Handler<ExecuteQuery> for Engine {
     type Result = ResponseActFuture<Self, Result<Vec<Vec<LabeledTypedTuple>>, Error>>;
 
+    #[tracing::instrument]
     fn handle(&mut self, msg: ExecuteQuery, ctx: &mut Context<Self>) -> Self::Result {
+        tracing::info!("executing query: {:?}", msg);
+
         let addr = ctx.address();
+        let catalogue = self.catalogue.clone();
 
         Box::pin(
             async move {
@@ -618,19 +622,60 @@ impl Handler<ExecuteQuery> for Engine {
                             constraints,
                             ..
                         } => {
-                            addr.send(CreateTable::from_sql(
+                            let q = CreateTable::try_from_sql(
                                 msg.db_name.clone(),
                                 name,
                                 columns,
                                 constraints,
-                            ))
-                            .await
-                            .map_err(|e| Error::MailboxError(e))??;
+                            )?;
+
+                            tracing::debug!("executing query: {:?}", q);
+
+                            addr.send(q).await.map_err(|e| Error::MailboxError(e))??;
 
                             results.push(Vec::<LabeledTypedTuple>::new());
                         }
-                        _ => {
-                            return Err(Error::Unimplemented);
+                        Statement::CreateDatabase { db_name, .. } => {
+                            addr.send(CreateDatabase::from_sql(db_name))
+                                .await
+                                .map_err(|e| Error::MailboxError(e))??;
+
+                            results.push(Vec::<LabeledTypedTuple>::new());
+                        }
+                        Statement::Insert {
+                            table_name,
+                            columns,
+                            source,
+                            ..
+                        } => {
+                            let table_name_disp = table_name.0[0].clone().value;
+
+                            // Get the expected list of columns
+                            let all_columns = catalogue
+                                .send(GetEntries(msg.db_name.clone(), table_name_disp.clone()))
+                                .await
+                                .map_err(|e| Error::MailboxError(e))??;
+                            let col_names = all_columns
+                                .into_iter()
+                                .map(|ent| (ent.attr_name, ent.ty))
+                                .collect::<Vec<(String, Ty)>>();
+
+                            let q = Insert::try_from_sql(
+                                msg.db_name.clone(),
+                                table_name,
+                                col_names,
+                                columns,
+                                source,
+                            )?;
+
+                            tracing::debug!("executing query: {:?}", q);
+
+                            addr.send(q).await.map_err(|e| Error::MailboxError(e))??;
+
+                            results.push(Vec::<LabeledTypedTuple>::new());
+                        }
+                        o => {
+                            return Err(Error::Unimplemented(Some(format!("{:?}", o))));
                         }
                     }
                 }

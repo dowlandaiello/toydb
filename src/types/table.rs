@@ -4,14 +4,14 @@ use super::super::{
     util::fs,
 };
 use serde::{Deserialize, Serialize};
-use sqlparser::ast::{DataType, TableConstraint};
+use sqlparser::ast::{DataType, Expr, Ident, TableConstraint, Value as AstValue};
 use std::{fmt::Display, mem};
 
 /// A name associated with a table.
 pub type TableName = String;
 
 /// Just primary key for now
-#[derive(Debug, Serialize, Deserialize)]
+#[derive(Debug, Serialize, Deserialize, Clone)]
 pub enum Constraint {
     PrimaryKey(Vec<String>),
 }
@@ -31,7 +31,7 @@ impl TryFrom<TableConstraint> for Constraint {
                     .map(|col| col.value)
                     .collect::<Vec<String>>(),
             )),
-            _ => Err(Error::Unimplemented),
+            o => Err(Error::Unimplemented(Some(format!("{:?}", o)))),
         }
     }
 }
@@ -108,6 +108,31 @@ impl LabeledTypedTuple {
 pub enum Value {
     String(String),
     Integer(i64),
+}
+
+impl From<Value> for Vec<u8> {
+    fn from(v: Value) -> Self {
+        match v {
+            Value::String(s) => s.into_bytes(),
+            Value::Integer(i) => i.to_le_bytes().to_vec(),
+        }
+    }
+}
+
+impl TryFrom<Expr> for Value {
+    type Error = Error;
+
+    fn try_from(e: Expr) -> Result<Self, Self::Error> {
+        match e {
+            Expr::Value(AstValue::SingleQuotedString(s))
+            | Expr::Value(AstValue::DoubleQuotedString(s)) => Ok(Self::String(s)),
+            Expr::Value(AstValue::Number(n_s, _)) => Ok(Self::Integer(
+                n_s.parse().map_err(|_| Error::MiscDecodeError)?,
+            )),
+            Expr::Identifier(Ident { value, .. }) => Ok(Self::String(value)),
+            o => Err(Error::Unimplemented(Some(format!("{:?}", o)))),
+        }
+    }
 }
 
 /// A type of a value in a column in a table.

@@ -25,7 +25,7 @@ pub enum Error {
     InvalidCondition,
     JoinColumnNotFound,
     SqlParserError(ParserError),
-    Unimplemented,
+    Unimplemented(Option<String>),
 }
 
 impl From<IoError> for Error {
@@ -60,7 +60,11 @@ impl fmt::Display for Error {
             Self::InvalidCondition => write!(f, "invalid condition"),
             Self::JoinColumnNotFound => write!(f, "join column not found"),
             Self::SqlParserError(e) => write!(f, "encountered an error while parsing SQL: {:?}", e),
-            Self::Unimplemented => write!(f, "this feature of SQL is not implemented yet"),
+            Self::Unimplemented(feature) => write!(
+                f,
+                "this feature of SQL is not implemented yet: {}",
+                feature.clone().unwrap_or(String::from("unknown feature"))
+            ),
         }
     }
 }
@@ -85,7 +89,7 @@ impl StdError for Error {
             | Self::MissingCatalogueEntry
             | Self::InvalidCondition
             | Self::JoinColumnNotFound
-            | Self::Unimplemented => None,
+            | Self::Unimplemented(_) => None,
         }
     }
 }
@@ -110,7 +114,7 @@ impl ErrorLike for Error {
             Self::InvalidCondition => 14,
             Self::JoinColumnNotFound => 15,
             Self::SqlParserError(_) => 16,
-            Self::Unimplemented => 17,
+            Self::Unimplemented(_) => 17,
         }
     }
 }

@@ -2,11 +2,12 @@ use super::super::super::{
     error::Error,
     types::{
         db::DbName,
-        table::{LabeledTypedTuple, TableName, Value},
+        table::{LabeledTypedTuple, TableName, Ty, Value},
     },
 };
 use actix::Message;
 use serde::{Deserialize, Serialize};
+use sqlparser::ast::{Ident, ObjectName, Query, SetExpr, Values};
 
 /// A message issued to the engine requesting that a tuple be inserted into the table.
 #[derive(Message, Debug)]
@@ -15,6 +16,57 @@ pub struct Insert {
     pub(crate) db_name: DbName,
     pub(crate) table_name: TableName,
     pub(crate) values: Vec<Vec<u8>>,
+}
+
+impl Insert {
+    pub fn try_from_sql(
+        db_name: DbName,
+        mut table_name: ObjectName,
+        all_columns: Vec<(String, Ty)>,
+        columns: Vec<Ident>,
+        source: Option<Box<Query>>,
+    ) -> Result<Self, Error> {
+        let mut values = all_columns
+            .into_iter()
+            .map(|(name, col)| match col {
+                Ty::String => (name, Value::String(String::default())),
+                Ty::Integer => (name, Value::Integer(i64::default())),
+            })
+            .collect::<Vec<(String, Value)>>();
+
+        match source.map(|b| *b) {
+            Some(Query { body, .. }) => match *body {
+                SetExpr::Values(Values { mut rows, .. }) => {
+                    for (v, c) in rows.remove(0).into_iter().zip(columns) {
+                        let col_name = c.value;
+                        let safe_v = v.try_into()?;
+
+                        values
+                            .iter_mut()
+                            .find(|(col, _)| col.as_str() == col_name.as_str())
+                            .map(|tup| {
+                                tup.1 = safe_v;
+                            });
+                    }
+                }
+                o => {
+                    return Err(Error::Unimplemented(Some(format!("{:?}", o))));
+                }
+            },
+            o => {
+                return Err(Error::Unimplemented(Some(format!("{:?}", o))));
+            }
+        };
+
+        Ok(Self {
+            db_name,
+            table_name: table_name.0.remove(0).value,
+            values: values
+                .into_iter()
+                .map(|(_, val)| <Value as Into<Vec<u8>>>::into(val))
+                .collect::<Vec<Vec<u8>>>(),
+        })
+    }
 }
 
 /// A comparison between two comparators
@@ -121,6 +173,25 @@ pub struct Rename {
     pub(crate) input: Vec<LabeledTypedTuple>,
     pub(crate) target: String,
     pub(crate) new_name: String,
+}
+
+/// A message issued to the engine requesting that a column be grouped and aggregated.
+pub struct GroupBy {
+    pub(crate) input: Vec<LabeledTypedTuple>,
+
+    // The name of the column to group by
+    pub(crate) group_by: String,
+
+    // The type of aggregate to use and the name of the column to apply it to
+    pub(crate) aggregate: Aggregate,
+}
+
+pub enum Aggregate {
+    Count(Option<String>),
+    Sum(Option<String>),
+    Min(Option<String>),
+    Max(Option<String>),
+    Avg(Option<String>),
 }
 
 /// A message issued to the engine requesting that a query be executed.

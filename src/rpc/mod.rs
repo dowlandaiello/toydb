@@ -10,7 +10,7 @@ use actix::Addr;
 use jsonrpc_v2::{Data, Params};
 use serde::{Deserialize, Serialize};
 
-#[derive(Serialize, Deserialize)]
+#[derive(Serialize, Deserialize, Debug)]
 pub struct ExecuteQueryReq {
     pub db_name: String,
     pub query: String,
@@ -21,6 +21,8 @@ pub async fn execute_query(
     data: Data<Addr<Engine>>,
     params: Params<ExecuteQueryReq>,
 ) -> Result<Vec<Vec<LabeledTypedTuple>>, Error> {
+    tracing::debug!("received request to execute query: {:?}", params.0);
+
     data.send(ExecuteQuery {
         db_name: params.0.db_name,
         query: params.0.query,

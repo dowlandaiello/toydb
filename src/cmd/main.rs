@@ -1,11 +1,14 @@
 use ascii_table::{Align, AsciiTable};
 use clap::Parser;
+use jsonrpc_v2::ResponseObject;
 use reqwest::Client;
 use rustyline::{
     error::ReadlineError,
     validate::{ValidationContext, ValidationResult, Validator},
     Completer, Editor, Helper, Highlighter, Hinter, Result, Result as LineResult,
 };
+use serde::{Deserialize, Serialize};
+use serde_json::Value;
 use std::fmt::Display;
 use toydb::{rpc::ExecuteQueryReq, types::table::LabeledTypedTuple};
 
@@ -14,6 +17,29 @@ use toydb::{rpc::ExecuteQueryReq, types::table::LabeledTypedTuple};
 struct Args {
     #[arg(short, long, default_value_t = String::from("http://localhost:3000/api"))]
     rpc_addr: String,
+}
+
+#[derive(Serialize, Deserialize)]
+struct JsonRpcReq {
+    jsonrpc: String,
+    id: String,
+    method: String,
+    params: Value,
+}
+
+#[derive(Debug, Serialize, Deserialize)]
+struct JsonRpcError {
+    code: i64,
+    message: String,
+    data: Option<String>,
+}
+
+#[derive(Serialize, Deserialize)]
+struct JsonRpcResp {
+    jsonrpc: String,
+    error: Option<JsonRpcError>,
+    result: Option<Vec<Vec<LabeledTypedTuple>>>,
+    id: String,
 }
 
 #[derive(Completer, Helper, Highlighter, Hinter)]
@@ -66,14 +92,29 @@ async fn main() -> Result<()> {
                     continue;
                 }
 
+                let exec_req = match serde_json::to_value(ExecuteQueryReq {
+                    db_name: active_db.clone(),
+                    query: line,
+                }) {
+                    Ok(v) => v,
+                    Err(e) => {
+                        eprintln!("failed to formulate query: {:?}", e);
+                        continue;
+                    }
+                };
+
+                let json_rpc_req = JsonRpcReq {
+                    jsonrpc: "2.0".to_owned(),
+                    id: "id".to_owned(),
+                    method: "execute_query".to_owned(),
+                    params: exec_req,
+                };
+
                 // This is a SQL command. Send it
                 let client = Client::new();
                 let resp = match client
                     .post(cli.rpc_addr.as_str())
-                    .json(&ExecuteQueryReq {
-                        db_name: active_db.clone(),
-                        query: line,
-                    })
+                    .json(&json_rpc_req)
                     .send()
                     .await
                 {
@@ -84,7 +125,7 @@ async fn main() -> Result<()> {
                     }
                 };
 
-                let res: Vec<Vec<LabeledTypedTuple>> = match resp.json().await {
+                let res: JsonRpcResp = match resp.json().await {
                     Ok(v) => v,
                     Err(e) => {
                         eprintln!("failed to execute query: {:?}", e);
@@ -92,7 +133,18 @@ async fn main() -> Result<()> {
                     }
                 };
 
-                for (i, rel) in res.into_iter().enumerate() {
+                let results = match res.result {
+                    Some(res) => res,
+                    _ => match res.error {
+                        Some(e) => {
+                            eprintln!("failed to execute query: {:?}", e);
+                            continue;
+                        }
+                        _ => panic!("no result but no error"),
+                    },
+                };
+
+                for (i, rel) in results.into_iter().enumerate() {
                     println!("Output Relation #{}:", i + 1);
 
                     if rel.is_empty() {
