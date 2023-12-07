@@ -12,8 +12,8 @@ use serde::{Deserialize, Serialize};
 
 #[derive(Serialize, Deserialize)]
 pub struct ExecuteQueryReq {
-    db_name: String,
-    query: String,
+    pub db_name: String,
+    pub query: String,
 }
 
 /// Executes an arbitrary SQL query.

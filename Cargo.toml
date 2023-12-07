@@ -3,12 +3,20 @@ name = "toydb"
 version = "0.1.0"
 edition = "2021"
 
+[[bin]]
+name = "toydbcli"
+path = "src/cmd/main.rs"
+
+[[bin]]
+name = "toydbd"
+path = "src/main.rs"
+
 [dependencies]
 jsonrpc-v2 = "0.13.0"
 actix-rt = "2.9.0"
 actix-web = "4.4.0"
 actix = "0.13.1"
-tokio = { version = "1.34.0", features = ["fs"] }
+tokio = { version = "1.34.0", features = ["fs", "macros", "rt-multi-thread"] }
 xdg = "2.5.2"
 futures = "0.3.29"
 prost = "0.12"
@@ -22,6 +30,10 @@ rand = "0.8.5"
 tracing-test = "0.2.4"
 serde_json = "1.0.108"
 sqlparser = "0.40.0"
+reqwest = { version = "0.11.22", features = ["json"] }
+rustyline = "13.0.0"
+clap = { version = "4.4.11", features = ["derive"] }
+ascii_table = "4.0.3"
 
 [build-dependencies]
 prost-build = "0.12.3"

@@ -5,7 +5,7 @@ use super::super::{
 };
 use serde::{Deserialize, Serialize};
 use sqlparser::ast::{DataType, TableConstraint};
-use std::mem;
+use std::{fmt::Display, mem};
 
 /// A name associated with a table.
 pub type TableName = String;
@@ -22,9 +22,9 @@ impl TryFrom<TableConstraint> for Constraint {
     fn try_from(constr: TableConstraint) -> Result<Self, Self::Error> {
         match constr {
             TableConstraint::Unique {
-                name,
                 columns,
                 is_primary: true,
+                ..
             } => Ok(Self::PrimaryKey(
                 columns
                     .into_iter()
@@ -88,6 +88,20 @@ pub struct TypedTuple(pub Vec<Value>);
 /// A tuple with column names.
 #[derive(Serialize, Deserialize, Debug, Clone)]
 pub struct LabeledTypedTuple(pub Vec<(String, Value)>);
+
+impl LabeledTypedTuple {
+    pub fn flatten_display(&self) -> Vec<&dyn Display> {
+        self.0
+            .iter()
+            .map(|v| -> &dyn Display {
+                match v {
+                    (_, Value::String(s)) => s,
+                    (_, Value::Integer(i)) => i,
+                }
+            })
+            .collect::<Vec<&dyn Display>>()
+    }
+}
 
 /// A typed value.
 #[derive(Serialize, Deserialize, Debug, PartialEq, PartialOrd, Clone, Hash, Eq)]
