@@ -1,7 +1,11 @@
 use ascii_table::{Align, AsciiTable};
 use clap::Parser;
 use reqwest::Client;
-use rustyline::{error::ReadlineError, DefaultEditor, Result};
+use rustyline::{
+    error::ReadlineError,
+    validate::{ValidationContext, ValidationResult, Validator},
+    Completer, Editor, Helper, Highlighter, Hinter, Result, Result as LineResult,
+};
 use std::fmt::Display;
 use toydb::{rpc::ExecuteQueryReq, types::table::LabeledTypedTuple};
 
@@ -12,12 +16,33 @@ struct Args {
     rpc_addr: String,
 }
 
+#[derive(Completer, Helper, Highlighter, Hinter)]
+struct InputValidator {}
+
+impl Validator for InputValidator {
+    fn validate(&self, ctx: &mut ValidationContext) -> LineResult<ValidationResult> {
+        let input = ctx.input();
+
+        if input.starts_with('\\') {
+            return Ok(ValidationResult::Valid(None));
+        }
+
+        if !input.ends_with(';') {
+            Ok(ValidationResult::Incomplete)
+        } else {
+            Ok(ValidationResult::Valid(None))
+        }
+    }
+}
+
 #[tokio::main]
 async fn main() -> Result<()> {
     let cli = Args::parse();
 
     // `()` can be used when no completer is required
-    let mut rl = DefaultEditor::new()?;
+    let mut rl = Editor::new()?;
+    let h = InputValidator {};
+    rl.set_helper(Some(h));
     let mut active_db = String::from("system_catalogue");
 
     loop {
