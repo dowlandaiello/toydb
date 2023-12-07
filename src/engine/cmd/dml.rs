@@ -113,3 +113,20 @@ pub struct Join {
     pub(crate) input_2: Vec<LabeledTypedTuple>,
     pub(crate) cond: Cmp,
 }
+
+/// A message issued to the engine requesting that a column be renamed in a relation.
+#[derive(Message, Debug)]
+#[rtype(result = "Result<Vec<LabeledTypedTuple>, Error>")]
+pub struct Rename {
+    pub(crate) input: Vec<LabeledTypedTuple>,
+    pub(crate) target: String,
+    pub(crate) new_name: String,
+}
+
+/// A message issued to the engine requesting that a query be executed.
+#[derive(Message, Debug)]
+#[rtype(result = "Result<Vec<Vec<LabeledTypedTuple>>, Error>")]
+pub struct ExecuteQuery {
+    pub(crate) query: String,
+    pub(crate) db_name: String,
+}

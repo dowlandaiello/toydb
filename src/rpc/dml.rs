@@ -1,6 +1,6 @@
 use super::super::{
     engine::{
-        cmd::dml::{Cmp, Insert, Join, Project, Select},
+        cmd::dml::{Cmp, Insert, Join, Project, Rename, Select},
         Engine,
     },
     error::Error,
@@ -116,6 +116,31 @@ pub async fn join(
         input_1,
         input_2,
         cond,
+    })
+    .await
+    .map_err(|e| Error::MailboxError(e))?
+}
+
+pub struct RenameReq {
+    pub(crate) input: Vec<LabeledTypedTuple>,
+    pub(crate) target: String,
+    pub(crate) new_name: String,
+}
+
+pub async fn rename(
+    data: Data<Addr<Engine>>,
+    params: Params<RenameReq>,
+) -> Result<Vec<LabeledTypedTuple>, Error> {
+    let RenameReq {
+        input,
+        target,
+        new_name,
+    } = params.0;
+
+    data.send(Rename {
+        input,
+        target,
+        new_name,
     })
     .await
     .map_err(|e| Error::MailboxError(e))?

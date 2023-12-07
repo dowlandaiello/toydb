@@ -1,6 +1,7 @@
 use actix::MailboxError;
 use jsonrpc_v2::ErrorLike;
 use prost::{DecodeError, EncodeError};
+use sqlparser::parser::ParserError;
 use std::{error::Error as StdError, fmt};
 use tokio::io::Error as IoError;
 use xdg::BaseDirectoriesError;
@@ -23,6 +24,8 @@ pub enum Error {
     MissingCatalogueEntry,
     InvalidCondition,
     JoinColumnNotFound,
+    SqlParserError(ParserError),
+    Unimplemented,
 }
 
 impl From<IoError> for Error {
@@ -56,6 +59,8 @@ impl fmt::Display for Error {
             Self::MissingCatalogueEntry => write!(f, "missing catalogue entry"),
             Self::InvalidCondition => write!(f, "invalid condition"),
             Self::JoinColumnNotFound => write!(f, "join column not found"),
+            Self::SqlParserError(e) => write!(f, "encountered an error while parsing SQL: {:?}", e),
+            Self::Unimplemented => write!(f, "this feature of SQL is not implemented yet"),
         }
     }
 }
@@ -68,6 +73,7 @@ impl StdError for Error {
             Self::MailboxError(e) => Some(e),
             Self::DecodeError(e) => Some(e),
             Self::EncodeError(e) => Some(e),
+            Self::SqlParserError(e) => Some(e),
             Self::PageOutOfBounds
             | Self::MutexError
             | Self::ConversionError
@@ -78,7 +84,8 @@ impl StdError for Error {
             | Self::MultiplePrimaryKeyClauses
             | Self::MissingCatalogueEntry
             | Self::InvalidCondition
-            | Self::JoinColumnNotFound => None,
+            | Self::JoinColumnNotFound
+            | Self::Unimplemented => None,
         }
     }
 }
@@ -102,6 +109,8 @@ impl ErrorLike for Error {
             Self::MissingCatalogueEntry => 13,
             Self::InvalidCondition => 14,
             Self::JoinColumnNotFound => 15,
+            Self::SqlParserError(_) => 16,
+            Self::Unimplemented => 17,
         }
     }
 }

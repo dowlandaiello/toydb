@@ -10,14 +10,15 @@ use buffer_pool::{BufferPool, DbHandle, GetBuffer};
 use catalogue::{Catalogue, GetEntries, GetEntry, InsertEntry};
 use cmd::{
     ddl::{CreateDatabase, CreateTable},
-    dml::{Cmp, Comparator, Insert, Join, Project, Select},
+    dml::{Cmp, Comparator, ExecuteQuery, Insert, Join, Project, Rename, Select},
 };
 use heap::{GetHeap, HeapHandle, HeapPool, InsertRecord, Iter as HeapIter};
 use index::{GetIndex, IndexPool, InsertKey, Iter};
 use iterator::Next;
 
-use actix::{Actor, Addr, Context, Handler, ResponseActFuture, WrapFuture};
+use actix::{Actor, Addr, AsyncContext, Context, Handler, Response, ResponseActFuture, WrapFuture};
 use prost::Message;
+use sqlparser::{ast::Statement, dialect::PostgreSqlDialect, parser::Parser};
 use std::{collections::HashMap, mem};
 use tokio::fs::OpenOptions;
 
@@ -515,56 +516,126 @@ impl Handler<Project> for Engine {
 }
 
 impl Handler<Join> for Engine {
-    type Result = ResponseActFuture<Self, Result<Vec<LabeledTypedTuple>, Error>>;
+    type Result = Result<Vec<LabeledTypedTuple>, Error>;
 
     fn handle(&mut self, msg: Join, _ctx: &mut Context<Self>) -> Self::Result {
         let Join {
-            mut input_1,
+            input_1,
             mut input_2,
             cond,
         } = msg;
-        let catalogue = self.catalogue.clone();
+
+        let mut results: HashMap<Value, LabeledTypedTuple> = HashMap::new();
+
+        // Get the columns to join on
+        let (a, b) = match cond {
+            Cmp::Eq(Comparator::Col(a), Comparator::Col(b)) => (a, b),
+            _ => {
+                return Err(Error::InvalidCondition);
+            }
+        };
+
+        for tup in input_1 {
+            let join_v = tup
+                .0
+                .iter()
+                .find(|(col_name, _)| col_name.as_str() == a.as_str())
+                .map(|(_, val)| val.clone())
+                .ok_or(Error::JoinColumnNotFound)?;
+            results.insert(join_v, tup);
+        }
+
+        for tup in input_2.iter_mut() {
+            let join_v = tup
+                .0
+                .iter()
+                .find(|(col_name, _)| col_name.as_str() == b.as_str())
+                .map(|(_, val)| val.clone())
+                .ok_or(Error::JoinColumnNotFound)?;
+            results
+                .get_mut(&join_v)
+                .ok_or(Error::JoinColumnNotFound)?
+                .0
+                .append(&mut tup.0);
+        }
+
+        Ok(results
+            .drain()
+            .map(|(_, v)| v)
+            .collect::<Vec<LabeledTypedTuple>>())
+    }
+}
+
+impl Handler<Rename> for Engine {
+    type Result = Result<Vec<LabeledTypedTuple>, Error>;
+
+    fn handle(&mut self, msg: Rename, _ctx: &mut Context<Self>) -> Self::Result {
+        let Rename {
+            input,
+            target,
+            new_name,
+        } = msg;
+
+        Ok(input
+            .into_iter()
+            .map(|tup| {
+                LabeledTypedTuple(
+                    tup.0
+                        .into_iter()
+                        .map(|(col_name, val)| {
+                            if col_name == target {
+                                (new_name.clone(), val)
+                            } else {
+                                (col_name, val)
+                            }
+                        })
+                        .collect::<Vec<_>>(),
+                )
+            })
+            .collect::<Vec<_>>())
+    }
+}
+
+impl Handler<ExecuteQuery> for Engine {
+    type Result = ResponseActFuture<Self, Result<Vec<Vec<LabeledTypedTuple>>, Error>>;
+
+    fn handle(&mut self, msg: ExecuteQuery, ctx: &mut Context<Self>) -> Self::Result {
+        let addr = ctx.address();
 
         Box::pin(
             async move {
-                let mut results: HashMap<Value, LabeledTypedTuple> = HashMap::new();
+                let dialect = PostgreSqlDialect {};
+                let ast = Parser::parse_sql(&dialect, msg.query.as_str())
+                    .map_err(|e| Error::SqlParserError(e))?;
 
-                // Get the columns to join on
-                let (a, b) = match cond {
-                    Cmp::Eq(Comparator::Col(a), Comparator::Col(b)) => (a, b),
-                    _ => {
-                        return Err(Error::InvalidCondition);
+                let mut results: Vec<Vec<LabeledTypedTuple>> = Vec::new();
+
+                for stmt in ast.into_iter() {
+                    match stmt {
+                        Statement::CreateTable {
+                            name,
+                            columns,
+                            constraints,
+                            ..
+                        } => {
+                            addr.send(CreateTable::from_sql(
+                                msg.db_name.clone(),
+                                name,
+                                columns,
+                                constraints,
+                            ))
+                            .await
+                            .map_err(|e| Error::MailboxError(e))??;
+
+                            results.push(Vec::<LabeledTypedTuple>::new());
+                        }
+                        _ => {
+                            return Err(Error::Unimplemented);
+                        }
                     }
-                };
-
-                for tup in input_1 {
-                    let join_v = tup
-                        .0
-                        .iter()
-                        .find(|(col_name, val)| col_name.as_str() == a.as_str())
-                        .map(|(_, val)| val.clone())
-                        .ok_or(Error::JoinColumnNotFound)?;
-                    results.insert(join_v, tup);
                 }
 
-                for tup in input_2.iter_mut() {
-                    let join_v = tup
-                        .0
-                        .iter()
-                        .find(|(col_name, val)| col_name.as_str() == a.as_str())
-                        .map(|(_, val)| val.clone())
-                        .ok_or(Error::JoinColumnNotFound)?;
-                    results
-                        .get_mut(&join_v)
-                        .ok_or(Error::JoinColumnNotFound)?
-                        .0
-                        .append(&mut tup.0);
-                }
-
-                Ok(results
-                    .drain()
-                    .map(|(k, v)| v)
-                    .collect::<Vec<LabeledTypedTuple>>())
+                Ok(results)
             }
             .into_actor(self),
         )

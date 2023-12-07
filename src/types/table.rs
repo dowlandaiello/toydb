@@ -4,6 +4,7 @@ use super::super::{
     util::fs,
 };
 use serde::{Deserialize, Serialize};
+use sqlparser::ast::{DataType, TableConstraint};
 use std::mem;
 
 /// A name associated with a table.
@@ -13,6 +14,26 @@ pub type TableName = String;
 #[derive(Debug, Serialize, Deserialize)]
 pub enum Constraint {
     PrimaryKey(Vec<String>),
+}
+
+impl TryFrom<TableConstraint> for Constraint {
+    type Error = Error;
+
+    fn try_from(constr: TableConstraint) -> Result<Self, Self::Error> {
+        match constr {
+            TableConstraint::Unique {
+                name,
+                columns,
+                is_primary: true,
+            } => Ok(Self::PrimaryKey(
+                columns
+                    .into_iter()
+                    .map(|col| col.value)
+                    .collect::<Vec<String>>(),
+            )),
+            _ => Err(Error::Unimplemented),
+        }
+    }
 }
 
 /// Gets the primary key attributes from a list of constraints.
@@ -80,6 +101,15 @@ pub enum Value {
 pub enum Ty {
     String,
     Integer,
+}
+
+impl From<DataType> for Ty {
+    fn from(d: DataType) -> Self {
+        match d {
+            DataType::Integer(_) | DataType::Int(_) => Self::Integer,
+            _ => Self::String,
+        }
+    }
 }
 
 impl TryFrom<Vec<u8>> for Ty {
