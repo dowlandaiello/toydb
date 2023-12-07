@@ -1,6 +1,6 @@
 use super::super::{
     engine::{
-        cmd::dml::{Cmp, Insert, Project, Select},
+        cmd::dml::{Cmp, Insert, Join, Project, Select},
         Engine,
     },
     error::Error,
@@ -93,4 +93,30 @@ pub async fn project(
     data.send(Project { input, columns })
         .await
         .map_err(|e| Error::MailboxError(e))?
+}
+
+#[derive(Serialize, Deserialize)]
+pub struct JoinReq {
+    pub(crate) input_1: Vec<LabeledTypedTuple>,
+    pub(crate) input_2: Vec<LabeledTypedTuple>,
+    pub(crate) cond: Cmp,
+}
+
+pub async fn join(
+    data: Data<Addr<Engine>>,
+    params: Params<JoinReq>,
+) -> Result<Vec<LabeledTypedTuple>, Error> {
+    let JoinReq {
+        input_1,
+        input_2,
+        cond,
+    } = params.0;
+
+    data.send(Join {
+        input_1,
+        input_2,
+        cond,
+    })
+    .await
+    .map_err(|e| Error::MailboxError(e))?
 }
