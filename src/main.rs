@@ -1,4 +1,5 @@
-use actix_web::{guard, web, App, HttpServer};
+use actix_cors::Cors;
+use actix_web::{guard, http, web, App, HttpServer};
 use jsonrpc_v2::{Data, Server};
 use std::io::Result as IoResult;
 use toydb::{
@@ -30,7 +31,12 @@ async fn main() -> IoResult<()> {
 
     HttpServer::new(move || {
         let rpc = rpc.clone();
-        App::new().service(
+        let cors = Cors::default()
+            .allowed_origin("http://localhost:8000")
+            .allowed_methods(vec!["GET", "POST"])
+            .allowed_header(http::header::CONTENT_TYPE);
+
+        App::new().wrap(cors).service(
             web::service("/api")
                 .guard(guard::Post())
                 .finish(rpc.into_web_service()),
