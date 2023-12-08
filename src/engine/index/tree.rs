@@ -106,17 +106,17 @@ fn make_internal_node_sorted(node: &mut BTreeInternalNode) -> Result<(), Error> 
         .iter()
         .enumerate()
         .filter(|(i, x)| i % 2 != 0 && **x != 0)
-        .collect::<Vec<(usize, &u64)>>();
-    keys.sort_by_key(|(_, x)| (*x).clone());
+        .enumerate()
+        .collect::<Vec<(usize, (usize, &u64))>>();
+    keys.sort_by_key(|(_, (_, x))| (*x).clone());
 
     tracing::debug!("sorted keys: {:?}", keys);
 
     let mut new_node = create_internal_node();
     let mut i = 0;
-
     let n_keys = keys.len();
 
-    for (k_i, (j, k)) in keys.into_iter().enumerate() {
+    for (k_i, (j, k)) in keys.into_iter() {
         if i > new_node.keys_pointers.len() - 2 {
             break;
         }
@@ -127,6 +127,8 @@ fn make_internal_node_sorted(node: &mut BTreeInternalNode) -> Result<(), Error> 
         if k_i == n_keys - 1 {
             // Insert last Gt position key
             new_node.keys_pointers[i + 2] = node.keys_pointers[j + 1];
+
+            i += 3;
 
             continue;
         }
@@ -1357,6 +1359,24 @@ mod tests {
         make_internal_node_sorted(&mut n).unwrap();
 
         assert_eq!(&n.keys_pointers[0..5], &vec![0, 1, 2, 3, 4]);
+
+        let mut n = create_internal_node();
+        n.keys_pointers = vec![75, 5, 99, 3, 101];
+        make_internal_node_sorted(&mut n).unwrap();
+
+        assert_eq!(&n.keys_pointers[0..5], &vec![99, 3, 101, 75, 5]);
+
+        let mut n = create_internal_node();
+        n.keys_pointers = vec![75, 5, 99, 3, 101, 0, 0, 0, 0];
+        make_internal_node_sorted(&mut n).unwrap();
+
+        assert_eq!(&n.keys_pointers[0..5], &vec![99, 3, 101, 75, 5]);
+
+        let mut n = create_internal_node();
+        n.keys_pointers = vec![0, 3, 101, 75, 5, 99, 0, 0, 0];
+        make_internal_node_sorted(&mut n).unwrap();
+
+        assert_eq!(&n.keys_pointers[0..6], &vec![0, 3, 101, 75, 5, 99]);
     }
 
     #[traced_test]
@@ -1757,14 +1777,14 @@ mod tests {
             let mut rng = rand::thread_rng();
 
             // Insert a shitton of random keys
-            for i in 0..100 {
+            for i in 0..1_000 {
                 let mut k: u64 = rng.gen();
 
                 while k == 0 {
                     k = rng.gen();
                 }
 
-                println!("inserting {}: {}", i, k);
+                tracing::info!("inserting {}", i);
 
                 tree_handle
                     .send(InsertKey(
@@ -1777,6 +1797,10 @@ mod tests {
                     .await
                     .ok()?
                     .ok()?;
+
+                let record = tree_handle.send(GetKey(k)).await.ok()?.ok()?;
+                assert_eq!(record.page, 10);
+                assert_eq!(record.page_idx, 52);
             }
 
             Some(())
