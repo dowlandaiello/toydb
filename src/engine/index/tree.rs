@@ -492,6 +492,14 @@ fn follow_node(
                 tracing::debug!("found candidate leaf node: {:?}", node);
 
                 return Ok((Some(SearchResult::LeafNode(node)), pos, handle));
+            } else if node.is_leaf_node && target == SearchTarget::InternalNode {
+                tracing::debug!("no candidate node found. giving up");
+
+                return Ok((None, pos, handle));
+            } else if target == SearchTarget::InternalNode {
+                tracing::debug!("found candidate internal node: {:?}", node);
+
+                return Ok((Some(SearchResult::InternalNode(node)), pos, handle));
             }
 
             node
@@ -521,15 +529,9 @@ fn follow_node(
             return Ok((Some(SearchResult::InternalNode(node)), pos, handle));
         };
 
-        if target == SearchTarget::LeafNode {
-            tracing::debug!("continue probing for leaf node");
+        tracing::debug!("continue probing for node");
 
-            return follow_node(handle, next, key, target).await;
-        }
-
-        tracing::debug!("no candidate node found. giving up");
-
-        Ok((None, pos, handle))
+        follow_node(handle, next, key, target).await
     })
 }
 
@@ -622,6 +624,9 @@ impl TreeHandle {
                             return Err(e);
                         }
                     };
+
+                tracing::debug!("got child nodes {:?}", c_pointer_children);
+
                 leaves.append(&mut c_pointer_children);
                 handle = got_handle;
             }
@@ -834,7 +839,7 @@ impl TreeHandle {
     }
 
     async fn split_internal_node(
-        mut f: OwnedMutexGuard<File>,
+        f: OwnedMutexGuard<File>,
         msg: &InsertKey,
     ) -> Result<((), OwnedMutexGuard<File>), (Error, OwnedMutexGuard<File>)> {
         tracing::debug!("splitting internal node with {:?}", msg);

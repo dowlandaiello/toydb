@@ -460,12 +460,14 @@ impl Handler<Select> for Engine {
                     .map(|ent| ent.attr_name)
                     .collect::<Vec<String>>();
 
-                for (i, tup) in untyped_results.into_iter().enumerate() {
+                for tup in untyped_results.into_iter() {
                     let mut row: Vec<(String, Value)> = Vec::new();
 
                     for (j, elem) in tup.elements.into_iter().enumerate() {
                         row.push((cat_attrs[j].clone(), conv(elem, j)?));
                     }
+
+                    tracing::debug!("applying filter {:?}", msg.filter);
 
                     if let Some(cmp) = &msg.filter {
                         let tup = LabeledTypedTuple(row);
