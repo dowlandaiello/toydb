@@ -33,7 +33,7 @@ sqlparser = "0.40.0"
 reqwest = { version = "0.11.22", features = ["json"] }
 rustyline = { version = "13.0.0", features = ["default", "derive"] }
 clap = { version = "4.4.11", features = ["derive"] }
-ascii_table = "4.0.3"
+prettytable-rs = "0.10.0"
 
 [build-dependencies]
 prost-build = "0.12.3"

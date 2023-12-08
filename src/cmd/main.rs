@@ -1,6 +1,6 @@
-use ascii_table::{Align, AsciiTable};
 use clap::Parser;
 use jsonrpc_v2::ResponseObject;
+use prettytable::{Cell, Row, Table};
 use reqwest::Client;
 use rustyline::{
     error::ReadlineError,
@@ -145,7 +145,7 @@ async fn main() -> Result<()> {
                 };
 
                 for (i, rel) in results.into_iter().enumerate() {
-                    println!("Output Relation #{}:", i + 1);
+                    println!("Output Relation #{} (cardinality {}):", i + 1, rel.len());
 
                     if rel.is_empty() {
                         println!("No tuples found.");
@@ -153,21 +153,27 @@ async fn main() -> Result<()> {
                         continue;
                     }
 
-                    let mut output_table = AsciiTable::default();
+                    let mut output_table = Table::new();
 
                     // Add column names
-                    for (i, (col_name, _)) in rel[0].0.iter().enumerate() {
-                        output_table
-                            .column(i)
-                            .set_header(col_name)
-                            .set_align(Align::Center);
+                    output_table.set_titles(Row::new(
+                        rel[0]
+                            .0
+                            .iter()
+                            .map(|(col_name, _)| Cell::new(col_name))
+                            .collect::<Vec<Cell>>(),
+                    ));
+
+                    for tup in rel {
+                        let repr = tup.flatten_display();
+                        output_table.add_row(Row::new(
+                            repr.into_iter()
+                                .map(|repr| Cell::new(format!("{}", repr).as_str()))
+                                .collect::<Vec<Cell>>(),
+                        ));
                     }
 
-                    output_table.print(
-                        rel.iter()
-                            .map(|tup| tup.flatten_display())
-                            .collect::<Vec<Vec<&dyn Display>>>(),
-                    );
+                    output_table.printstd();
                 }
             }
             Err(ReadlineError::Interrupted) => break,
