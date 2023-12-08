@@ -18,10 +18,10 @@ use heap::{GetHeap, HeapHandle, HeapPool, InsertRecord, Iter as HeapIter};
 use index::{GetIndex, IndexPool, InsertKey, Iter};
 use iterator::Next;
 
-use actix::{Actor, Addr, AsyncContext, Context, Handler, Response, ResponseActFuture, WrapFuture};
+use actix::{Actor, Addr, AsyncContext, Context, Handler, ResponseActFuture, WrapFuture};
 use prost::Message;
 use sqlparser::{
-    ast::{SetExpr, Statement, TableFactor},
+    ast::{Expr, Ident, SelectItem, SetExpr, Statement, TableFactor},
     dialect::PostgreSqlDialect,
     parser::Parser,
 };
@@ -855,15 +855,77 @@ impl Handler<ExecuteQuery> for Engine {
                                 for table in s.from {
                                     match table.relation {
                                         TableFactor::Table { mut name, .. } => {
-                                            in_tuples.push(
-                                                addr.send(Select {
+                                            let mut tuples = addr
+                                                .send(Select {
                                                     db_name: msg.db_name.clone(),
                                                     table_name: name.0.remove(0).value,
                                                     filter: selection.clone(),
                                                 })
                                                 .await
-                                                .map_err(|e| Error::MailboxError(e))??,
+                                                .map_err(|e| Error::MailboxError(e))??;
+
+                                            // If there is a projection, execute it
+                                            if s.projection.is_empty() {
+                                                in_tuples.push(tuples);
+
+                                                continue;
+                                            }
+
+                                            let is_wildcard = match s.projection[0] {
+                                                SelectItem::Wildcard(_) => true,
+                                                _ => false,
+                                            };
+
+                                            // Selecting all columns
+                                            if is_wildcard {
+                                                in_tuples.push(tuples);
+
+                                                continue;
+                                            }
+
+                                            // Execute the projection
+                                            let columns = s
+                                                .projection
+                                                .iter()
+                                                .map(|proj| match proj {
+                                                    SelectItem::UnnamedExpr(Expr::Identifier(
+                                                        Ident { value, .. },
+                                                    )) => Ok(vec![value.clone()]),
+                                                    SelectItem::UnnamedExpr(Expr::Tuple(tup)) => {
+                                                        tup.iter()
+                                                            .map(|elem| match elem {
+                                                                Expr::Identifier(Ident {
+                                                                    value,
+                                                                    ..
+                                                                }) => Ok(value.clone()),
+                                                                o => Err(Error::Unimplemented(
+                                                                    Some(format!("{:?}", o)),
+                                                                )),
+                                                            })
+                                                            .collect::<Result<Vec<String>, Error>>()
+                                                    }
+                                                    o => Err(Error::Unimplemented(Some(format!(
+                                                        "{:?}",
+                                                        o
+                                                    )))),
+                                                })
+                                                .collect::<Result<Vec<Vec<String>>, Error>>()?
+                                                .concat();
+
+                                            tracing::debug!(
+                                                "projecting with columns: {:?}",
+                                                columns
                                             );
+
+                                            tuples = addr
+                                                .send(Project {
+                                                    input: tuples,
+                                                    columns,
+                                                })
+                                                .await
+                                                .map_err(|e| Error::MailboxError(e))??;
+
+                                            in_tuples.push(tuples);
                                         }
                                         o => {
                                             return Err(Error::Unimplemented(Some(format!(
