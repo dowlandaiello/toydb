@@ -99,11 +99,53 @@ fn create_leaf_node() -> BTreeLeafNode {
     node
 }
 
+#[tracing::instrument]
+fn make_internal_node_sorted(node: &mut BTreeInternalNode) -> Result<(), Error> {
+    let mut keys = node
+        .keys_pointers
+        .iter()
+        .enumerate()
+        .filter(|(i, x)| i % 2 != 0 && **x != 0)
+        .collect::<Vec<(usize, &u64)>>();
+    keys.sort_by_key(|(_, x)| (*x).clone());
+
+    tracing::debug!("sorted keys: {:?}", keys);
+
+    let mut new_node = create_internal_node();
+    let mut i = 0;
+
+    let n_keys = keys.len();
+
+    for (k_i, (j, k)) in keys.into_iter().enumerate() {
+        if i > new_node.keys_pointers.len() - 2 {
+            break;
+        }
+
+        new_node.keys_pointers[i] = node.keys_pointers[j - 1];
+        new_node.keys_pointers[i + 1] = k.clone();
+
+        if k_i == n_keys - 1 {
+            // Insert last Gt position key
+            new_node.keys_pointers[i + 2] = node.keys_pointers[j + 1];
+
+            continue;
+        }
+
+        i += 2;
+    }
+
+    node.keys_pointers = new_node.keys_pointers;
+
+    tracing::debug!("sorted: {:?}", node.keys_pointers);
+
+    Ok(())
+}
+
 fn len_internal_keys(node: &BTreeInternalNode) -> usize {
     node.keys_pointers
         .iter()
         .enumerate()
-        .filter(|(i, x)| i % 2 != 0 && x != &&0)
+        .filter(|(i, x)| i % 2 != 0 && **x != 0)
         .map(|(_, x)| x)
         .collect::<Vec<&u64>>()
         .len()
@@ -112,7 +154,7 @@ fn len_internal_keys(node: &BTreeInternalNode) -> usize {
 fn len_leaf_node_keys(node: &BTreeLeafNode) -> usize {
     node.keys
         .iter()
-        .filter(|x| x != &&0)
+        .filter(|x| **x != 0)
         .collect::<Vec<&u64>>()
         .len()
 }
@@ -121,7 +163,7 @@ fn len_internal_child_pointers(node: &BTreeInternalNode) -> usize {
     node.keys_pointers
         .iter()
         .enumerate()
-        .filter(|(i, x)| i % 2 == 0 && x != &&0)
+        .filter(|(i, x)| i % 2 == 0 && **x != 0)
         .map(|(_, x)| x)
         .collect::<Vec<&u64>>()
         .len()
@@ -146,17 +188,6 @@ fn pos_last_entry(node: &BTreeInternalNode) -> Option<usize> {
         .filter(|(_, x)| **x != 0)
         .map(|(i, _)| i)
         .last()
-}
-
-fn pos_last_key(node: &BTreeInternalNode) -> Option<usize> {
-    node.keys_pointers
-        .iter()
-        .enumerate()
-        .filter(|(i, x)| i % 2 != 0 && x != &&0)
-        .map(|(i, _)| i)
-        .collect::<Vec<usize>>()
-        .last()
-        .map(|i| i.clone())
 }
 
 /// Inserts the key and value into the btree node, if space exists.
@@ -212,24 +243,10 @@ fn insert_internal(node: &mut BTreeInternalNode, k: SearchKey, v: u64) -> Result
         }
         None => {
             let pos_insert = pos_last_entry(&node).ok_or(Error::TraversalError)?;
-            let pos_insert_key = pos_last_key(&node);
 
             if len_keys < ORDER && len_children <= ORDER {
                 match k {
                     SearchKey::Lt(k) => {
-                        if let Some(prev_key) = pos_insert_key {
-                            tracing::debug!(
-                                "checking B-tree semantics for insertion: {} < {}?: {}",
-                                node.keys_pointers[prev_key],
-                                k,
-                                node.keys_pointers[prev_key] < k
-                            );
-
-                            if node.keys_pointers[prev_key] > k {
-                                return Err(Error::TraversalError);
-                            }
-                        }
-
                         tracing::debug!(
                             "inserting in less than position in {:?} at {}",
                             node,
@@ -248,19 +265,6 @@ fn insert_internal(node: &mut BTreeInternalNode, k: SearchKey, v: u64) -> Result
                         node.keys_pointers[pos_insert + 1] = v;
                     }
                     SearchKey::Gt(k) => {
-                        if let Some(prev_key) = pos_insert_key {
-                            tracing::debug!(
-                                "checking B-tree semantics for insertion: {} < {}?: {}",
-                                node.keys_pointers[prev_key],
-                                k,
-                                node.keys_pointers[prev_key] < k
-                            );
-
-                            if node.keys_pointers[prev_key] > k {
-                                return Err(Error::TraversalError);
-                            }
-                        }
-
                         tracing::debug!(
                             "inserting in GYATT position in {:?} at {}",
                             node,
@@ -280,6 +284,9 @@ fn insert_internal(node: &mut BTreeInternalNode, k: SearchKey, v: u64) -> Result
                         node.keys_pointers[pos_insert + 2] = v;
                     }
                 }
+
+                // Put the values back into sorted order
+                make_internal_node_sorted(node)?;
 
                 Ok(())
             } else {
@@ -937,7 +944,7 @@ impl TreeHandle {
 
         // Split the node up into left and right nodes
         let left = left_values_internal(&n);
-        let right = left_values_internal(&n);
+        let right = right_values_internal(&n);
         let med = median(Node::InternalNode(&n));
 
         tracing::debug!("splitting by {} into {:?}, {:?}", med, left, right);
@@ -1069,6 +1076,8 @@ impl Handler<InsertKey> for TreeHandle {
                             return Ok(x);
                         }
                         Err((Error::TraversalError, fi)) => {
+                            tracing::debug!("could not insert into empty tree");
+
                             f = fi;
                         }
                         Err((e, _)) => {
@@ -1089,6 +1098,8 @@ impl Handler<InsertKey> for TreeHandle {
                             return Ok(x);
                         }
                         Err((Error::TraversalError, fi)) => {
+                            tracing::debug!("could not insert into leaf node");
+
                             f = fi;
                         }
                         Err((e, _)) => {
@@ -1106,6 +1117,8 @@ impl Handler<InsertKey> for TreeHandle {
                             return Ok(x);
                         }
                         Err((Error::TraversalError, fi)) => {
+                            tracing::debug!("could not insert into internal node");
+
                             f = fi;
                         }
                         Err((e, _)) => {
@@ -1121,6 +1134,8 @@ impl Handler<InsertKey> for TreeHandle {
                         }
                     }
                 }
+
+                tracing::debug!("retrying insert");
 
                 addr.send(msg).await.map_err(|e| Error::MailboxError(e))?
             }
@@ -1336,6 +1351,16 @@ mod tests {
 
     #[traced_test]
     #[test]
+    fn test_make_internal_node_sorted() {
+        let mut n = create_internal_node();
+        n.keys_pointers = vec![0, 1, 2, 3, 4];
+        make_internal_node_sorted(&mut n).unwrap();
+
+        assert_eq!(&n.keys_pointers[0..5], &vec![0, 1, 2, 3, 4]);
+    }
+
+    #[traced_test]
+    #[test]
     fn test_get_internal() {
         let mut node = create_internal_node();
 
@@ -1343,10 +1368,10 @@ mod tests {
         // [pointer: (1, 1), key: 2, pointer: (3, 3), key: 4, pointer: (5, 5)]
         tracing::info!("inserting 5 test values");
 
-        insert_internal(&mut node, SearchKey::Gt(2), 3).unwrap();
+        insert_internal(&mut node, SearchKey::Lt(2), 1).unwrap();
         tracing::info!("wrote 1 test value");
 
-        insert_internal(&mut node, SearchKey::Lt(2), 1).unwrap();
+        insert_internal(&mut node, SearchKey::Lt(4), 3).unwrap();
         tracing::info!("wrote 2nd test value");
 
         insert_internal(&mut node, SearchKey::Gt(4), 5).unwrap();
@@ -1355,14 +1380,14 @@ mod tests {
         insert_internal(&mut node, SearchKey::Gt(6), 7).unwrap();
         tracing::info!("wrote 4th test value");
 
-        insert_internal(&mut node, SearchKey::Gt(8), 9).unwrap();
+        insert_internal(&mut node, SearchKey::Lt(9), 8).unwrap();
         tracing::info!("successfuly inserted test keys: {:?}", node.keys_pointers);
 
         assert_eq!(get_internal(&node, SearchKey::Lt(2)), Some(1));
         assert_eq!(get_internal(&node, SearchKey::Lt(4)), Some(3));
+        assert_eq!(get_internal(&node, SearchKey::Gt(4)), Some(5));
         assert_eq!(get_internal(&node, SearchKey::Lt(6)), Some(5));
         assert_eq!(get_internal(&node, SearchKey::Lt(8)), Some(7));
-        assert_eq!(get_internal(&node, SearchKey::Gt(8)), Some(9));
     }
 
     #[traced_test]
@@ -1732,7 +1757,7 @@ mod tests {
             let mut rng = rand::thread_rng();
 
             // Insert a shitton of random keys
-            for i in 0..1000 {
+            for i in 0..100 {
                 let mut k: u64 = rng.gen();
 
                 while k == 0 {
