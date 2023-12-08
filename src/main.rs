@@ -1,3 +1,4 @@
+use actix_cors::Cors;
 use actix_web::{guard, web, App, HttpServer};
 use jsonrpc_v2::{Data, Server};
 use std::io::Result as IoResult;
@@ -28,7 +29,7 @@ async fn main() -> IoResult<()> {
 
     HttpServer::new(move || {
         let rpc = rpc.clone();
-        App::new().service(
+        App::new().wrap(Cors::permissive()).service(
             web::service("/api")
                 .guard(guard::Post())
                 .finish(rpc.into_web_service()),
