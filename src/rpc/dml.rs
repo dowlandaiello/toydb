@@ -1,6 +1,6 @@
 use super::super::{
     engine::{
-        cmd::dml::{Cmp, Insert, Join, Project, Rename, Select},
+        cmd::dml::{Aggregate, Cmp, GroupBy, Insert, Join, Project, Rename, Select},
         Engine,
     },
     error::Error,
@@ -121,6 +121,7 @@ pub async fn join(
     .map_err(|e| Error::MailboxError(e))?
 }
 
+#[derive(Serialize, Deserialize)]
 pub struct RenameReq {
     pub(crate) input: Vec<LabeledTypedTuple>,
     pub(crate) target: String,
@@ -141,6 +142,32 @@ pub async fn rename(
         input,
         target,
         new_name,
+    })
+    .await
+    .map_err(|e| Error::MailboxError(e))?
+}
+
+#[derive(Serialize, Deserialize)]
+pub struct GroupByReq {
+    pub(crate) input: Vec<LabeledTypedTuple>,
+    pub(crate) group_by: Vec<String>,
+    pub(crate) aggregate: Vec<Aggregate>,
+}
+
+pub async fn group_by(
+    data: Data<Addr<Engine>>,
+    params: Params<GroupByReq>,
+) -> Result<Vec<LabeledTypedTuple>, Error> {
+    let GroupByReq {
+        input,
+        group_by,
+        aggregate,
+    } = params.0;
+
+    data.send(GroupBy {
+        input,
+        group_by,
+        aggregate,
     })
     .await
     .map_err(|e| Error::MailboxError(e))?

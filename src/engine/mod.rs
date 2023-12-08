@@ -10,7 +10,9 @@ use buffer_pool::{BufferPool, DbHandle, GetBuffer};
 use catalogue::{Catalogue, GetEntries, GetEntry, InsertEntry};
 use cmd::{
     ddl::{CreateDatabase, CreateTable},
-    dml::{Cmp, Comparator, ExecuteQuery, Insert, Join, Project, Rename, Select},
+    dml::{
+        Aggregate, Cmp, Comparator, ExecuteQuery, GroupBy, Insert, Join, Project, Rename, Select,
+    },
 };
 use heap::{GetHeap, HeapHandle, HeapPool, InsertRecord, Iter as HeapIter};
 use index::{GetIndex, IndexPool, InsertKey, Iter};
@@ -593,6 +595,171 @@ impl Handler<Rename> for Engine {
                 )
             })
             .collect::<Vec<_>>())
+    }
+}
+
+impl Handler<GroupBy> for Engine {
+    type Result = Result<Vec<LabeledTypedTuple>, Error>;
+
+    fn handle(&mut self, msg: GroupBy, _ctx: &mut Context<Self>) -> Self::Result {
+        let mut results: HashMap<Vec<Value>, Vec<LabeledTypedTuple>> = HashMap::new();
+
+        // Collect all tuples with matching values of all group by columns
+        for tup in msg.input {
+            let group_by_values = tup
+                .0
+                .iter()
+                .filter(|(col_name, _)| msg.group_by.contains(col_name))
+                .map(|(_, val)| val.clone())
+                .collect::<Vec<Value>>();
+
+            if !results.contains_key(&group_by_values) {
+                results.insert(group_by_values.clone(), Vec::new());
+            }
+
+            results.get_mut(&group_by_values).map(|ent| ent.push(tup));
+        }
+
+        // Random selected row from group alongside aggregate columns
+        let mut final_results: HashMap<Vec<Value>, LabeledTypedTuple> = HashMap::new();
+
+        // Perform all aggregation functions on all groups
+        for (k, v) in results.into_iter() {
+            for agg in &msg.aggregate {
+                match agg {
+                    Aggregate::Avg(col) => {
+                        let avg_items = v
+                            .iter()
+                            .filter_map(|tup| {
+                                tup.0
+                                    .iter()
+                                    .filter(|(col_name, _)| col.as_str() == col_name.as_str())
+                                    .map(|(_, val)| match val {
+                                        Value::Integer(n) => Some(n.clone()),
+                                        Value::String(_) => None,
+                                    })
+                                    .flatten()
+                                    .next()
+                            })
+                            .collect::<Vec<i64>>();
+                        let avg = avg_items.iter().sum::<i64>() / avg_items.len() as i64;
+
+                        // Add it as a column
+                        let representative = final_results
+                            .entry(k.clone())
+                            .or_insert_with(|| v[0].clone());
+                        representative
+                            .0
+                            .push((format!("AVG({})", col.clone()), Value::Integer(avg)));
+                    }
+                    Aggregate::Sum(col) => {
+                        let sum_items = v
+                            .iter()
+                            .filter_map(|tup| {
+                                tup.0
+                                    .iter()
+                                    .filter(|(col_name, _)| col.as_str() == col_name.as_str())
+                                    .map(|(_, val)| match val {
+                                        Value::Integer(n) => Some(n.clone()),
+                                        Value::String(_) => None,
+                                    })
+                                    .flatten()
+                                    .next()
+                            })
+                            .collect::<Vec<i64>>();
+                        let sum = sum_items.iter().sum::<i64>();
+
+                        // Add it as a column
+                        let representative = final_results
+                            .entry(k.clone())
+                            .or_insert_with(|| v[0].clone());
+                        representative
+                            .0
+                            .push((format!("SUM({})", col), Value::Integer(sum)));
+                    }
+                    Aggregate::Count(col) => {
+                        let count_items = v
+                            .iter()
+                            .filter_map(|tup| {
+                                tup.0
+                                    .iter()
+                                    .filter(|(col_name, _)| {
+                                        col.as_ref()
+                                            .map(|col| col.as_str() == col_name.as_str())
+                                            .unwrap_or(true)
+                                    })
+                                    .map(|(_, val)| val.clone())
+                                    .next()
+                            })
+                            .collect::<Vec<Value>>();
+                        let count = count_items.len();
+
+                        // Add it as a column
+                        let representative = final_results
+                            .entry(k.clone())
+                            .or_insert_with(|| v[0].clone());
+                        representative.0.push((
+                            format!("COUNT({})", col.clone().unwrap_or("*".to_owned())),
+                            Value::Integer(count as i64),
+                        ));
+                    }
+                    Aggregate::Max(col) => {
+                        let mut max_items = v
+                            .iter()
+                            .filter_map(|tup| {
+                                tup.0
+                                    .iter()
+                                    .filter(|(col_name, _)| col.as_str() == col_name.as_str())
+                                    .map(|(_, val)| match val {
+                                        Value::Integer(n) => Some(n.clone()),
+                                        Value::String(_) => None,
+                                    })
+                                    .flatten()
+                                    .next()
+                            })
+                            .collect::<Vec<i64>>();
+                        max_items.sort();
+                        let max = max_items[max_items.len() - 1];
+
+                        // Add it as a column
+                        let representative = final_results
+                            .entry(k.clone())
+                            .or_insert_with(|| v[0].clone());
+                        representative
+                            .0
+                            .push((format!("MAX({})", col), Value::Integer(max)));
+                    }
+                    Aggregate::Min(col) => {
+                        let mut min_items = v
+                            .iter()
+                            .filter_map(|tup| {
+                                tup.0
+                                    .iter()
+                                    .filter(|(col_name, _)| col.as_str() == col_name.as_str())
+                                    .map(|(_, val)| match val {
+                                        Value::Integer(n) => Some(n.clone()),
+                                        Value::String(_) => None,
+                                    })
+                                    .flatten()
+                                    .next()
+                            })
+                            .collect::<Vec<i64>>();
+                        min_items.sort();
+                        let min = min_items[0];
+
+                        // Add it as a column
+                        let representative = final_results
+                            .entry(k.clone())
+                            .or_insert_with(|| v[0].clone());
+                        representative
+                            .0
+                            .push((format!("MAX({})", col), Value::Integer(min)));
+                    }
+                }
+            }
+        }
+
+        todo!()
     }
 }
 

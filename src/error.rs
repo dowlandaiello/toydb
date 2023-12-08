@@ -26,6 +26,7 @@ pub enum Error {
     JoinColumnNotFound,
     SqlParserError(ParserError),
     Unimplemented(Option<String>),
+    AggregationFailed,
 }
 
 impl From<IoError> for Error {
@@ -65,6 +66,7 @@ impl fmt::Display for Error {
                 "this feature of SQL is not implemented yet: {}",
                 feature.clone().unwrap_or(String::from("unknown feature"))
             ),
+            Self::AggregationFailed => write!(f, "the aggregation function failed"),
         }
     }
 }
@@ -89,7 +91,8 @@ impl StdError for Error {
             | Self::MissingCatalogueEntry
             | Self::InvalidCondition
             | Self::JoinColumnNotFound
-            | Self::Unimplemented(_) => None,
+            | Self::Unimplemented(_)
+            | Self::AggregationFailed => None,
         }
     }
 }
@@ -115,6 +118,7 @@ impl ErrorLike for Error {
             Self::JoinColumnNotFound => 15,
             Self::SqlParserError(_) => 16,
             Self::Unimplemented(_) => 17,
+            Self::AggregationFailed => 18,
         }
     }
 }

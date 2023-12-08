@@ -176,22 +176,25 @@ pub struct Rename {
 }
 
 /// A message issued to the engine requesting that a column be grouped and aggregated.
+#[derive(Message, Debug)]
+#[rtype(result = "Result<Vec<LabeledTypedTuple>, Error>")]
 pub struct GroupBy {
     pub(crate) input: Vec<LabeledTypedTuple>,
 
     // The name of the column to group by
-    pub(crate) group_by: String,
+    pub(crate) group_by: Vec<String>,
 
     // The type of aggregate to use and the name of the column to apply it to
-    pub(crate) aggregate: Aggregate,
+    pub(crate) aggregate: Vec<Aggregate>,
 }
 
+#[derive(Serialize, Deserialize, Debug)]
 pub enum Aggregate {
     Count(Option<String>),
-    Sum(Option<String>),
-    Min(Option<String>),
-    Max(Option<String>),
-    Avg(Option<String>),
+    Sum(String),
+    Min(String),
+    Max(String),
+    Avg(String),
 }
 
 /// A message issued to the engine requesting that a query be executed.

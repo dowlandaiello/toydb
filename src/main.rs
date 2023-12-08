@@ -5,7 +5,7 @@ use toydb::{
     engine::Engine,
     rpc::{
         ddl::{create_database, create_table},
-        dml::{insert, join, project, select},
+        dml::{group_by, insert, join, project, rename, select},
         execute_query,
     },
 };
@@ -23,6 +23,8 @@ async fn main() -> IoResult<()> {
         .with_method("select", select)
         .with_method("project", project)
         .with_method("join", join)
+        .with_method("rename", rename)
+        .with_method("group_by", group_by)
         .with_method("execute_query", execute_query)
         .finish();
 
