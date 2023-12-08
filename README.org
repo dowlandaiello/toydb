@@ -2,7 +2,7 @@
 #+AUTHOR: Dowland Aiello
 #+DATE: 11/26/23
 
-ToyDB is a relational database implemented in Rust for learning purposes. ToyDB is unique in that it uses an actor concurrency model with [[https://github.com/actix/actix][Actix]], asynchronous I/O with [[https://github.com/tokio-rs/tokio][Tokio]], and a lisp-like query syntax. However, besides these implementation details, this database seeks to follow database systems textbook implementation guidelines.
+ToyDB is a relational database implemented in Rust for learning purposes. ToyDB is unique in that it uses an actor concurrency model with [[https://github.com/actix/actix][Actix]], and asynchronous I/O with [[https://github.com/tokio-rs/tokio][Tokio]]. However, besides these implementation details, this database seeks to follow database systems textbook implementation guidelines.
 
 * TODO To-Do [3/5]
 
