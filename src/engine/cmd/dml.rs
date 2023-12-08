@@ -7,7 +7,9 @@ use super::super::super::{
 };
 use actix::Message;
 use serde::{Deserialize, Serialize};
-use sqlparser::ast::{Ident, ObjectName, Query, SetExpr, Values};
+use sqlparser::ast::{
+    BinaryOperator, Expr, Ident, ObjectName, Query, SetExpr, Value as SqlValue, Values,
+};
 
 /// A message issued to the engine requesting that a tuple be inserted into the table.
 #[derive(Message, Debug)]
@@ -70,7 +72,7 @@ impl Insert {
 }
 
 /// A comparison between two comparators
-#[derive(Serialize, Deserialize, Debug)]
+#[derive(Serialize, Deserialize, Debug, Clone)]
 pub enum Cmp {
     Eq(Comparator, Comparator),
     Lt(Comparator, Comparator),
@@ -79,6 +81,31 @@ pub enum Cmp {
 }
 
 impl Cmp {
+    pub fn try_from_sql(e: Expr) -> Result<Self, Error> {
+        match e {
+            Expr::BinaryOp { left, op, right } => match op {
+                BinaryOperator::Eq => Ok(Self::Eq(
+                    Comparator::try_from_sql(*left)?,
+                    Comparator::try_from_sql(*right)?,
+                )),
+                BinaryOperator::Lt => Ok(Self::Lt(
+                    Comparator::try_from_sql(*left)?,
+                    Comparator::try_from_sql(*right)?,
+                )),
+                BinaryOperator::Gt => Ok(Self::Gt(
+                    Comparator::try_from_sql(*left)?,
+                    Comparator::try_from_sql(*right)?,
+                )),
+                BinaryOperator::NotEq => Ok(Self::Ne(
+                    Comparator::try_from_sql(*left)?,
+                    Comparator::try_from_sql(*right)?,
+                )),
+                o => Err(Error::Unimplemented(Some(format!("{:?}", o)))),
+            },
+            o => Err(Error::Unimplemented(Some(format!("{:?}", o)))),
+        }
+    }
+
     /// Returns whether or not the value falls under the comparison clause.
     pub fn has_value(&self, tup: &LabeledTypedTuple, attr_names: impl AsRef<[String]>) -> bool {
         self.helper(tup, attr_names).unwrap_or_default()
@@ -115,13 +142,21 @@ impl Cmp {
 }
 
 /// Items that can be compared.
-#[derive(Serialize, Deserialize, Debug)]
+#[derive(Serialize, Deserialize, Debug, Clone)]
 pub enum Comparator {
     Col(String),
     Val(Value),
 }
 
 impl Comparator {
+    fn try_from_sql(e: Expr) -> Result<Self, Error> {
+        match e {
+            Expr::Identifier(ident) => Ok(Self::Col(ident.value)),
+            Expr::Value(v) => Ok(Self::Val(v.try_into()?)),
+            o => Err(Error::Unimplemented(Some(format!("{:?}", o)))),
+        }
+    }
+
     fn to_value_for(
         &self,
         tup: &LabeledTypedTuple,

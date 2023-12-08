@@ -154,7 +154,6 @@ async fn main() -> Result<()> {
                     }
 
                     let mut output_table = AsciiTable::default();
-                    output_table.set_max_width(rel[0].0.len());
 
                     // Add column names
                     for (i, (col_name, _)) in rel[0].0.iter().enumerate() {

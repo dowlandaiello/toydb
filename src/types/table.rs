@@ -135,6 +135,22 @@ impl TryFrom<Expr> for Value {
     }
 }
 
+impl TryFrom<AstValue> for Value {
+    type Error = Error;
+
+    fn try_from(v: AstValue) -> Result<Self, Self::Error> {
+        match v {
+            AstValue::SingleQuotedString(s) | AstValue::DoubleQuotedString(s) => {
+                Ok(Self::String(s))
+            }
+            AstValue::Number(n_s, _) => Ok(Self::Integer(
+                n_s.parse().map_err(|_| Error::MiscDecodeError)?,
+            )),
+            o => Err(Error::Unimplemented(Some(format!("{:?}", o)))),
+        }
+    }
+}
+
 /// A type of a value in a column in a table.
 #[derive(Serialize, Deserialize, Debug, Clone)]
 pub enum Ty {

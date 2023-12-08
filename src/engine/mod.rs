@@ -20,7 +20,11 @@ use iterator::Next;
 
 use actix::{Actor, Addr, AsyncContext, Context, Handler, Response, ResponseActFuture, WrapFuture};
 use prost::Message;
-use sqlparser::{ast::Statement, dialect::PostgreSqlDialect, parser::Parser};
+use sqlparser::{
+    ast::{SetExpr, Statement, TableFactor},
+    dialect::PostgreSqlDialect,
+    parser::Parser,
+};
 use std::{collections::HashMap, mem};
 use tokio::fs::OpenOptions;
 
@@ -841,11 +845,48 @@ impl Handler<ExecuteQuery> for Engine {
 
                             results.push(Vec::<LabeledTypedTuple>::new());
                         }
+                        // TODO: There is absolutely zero query optimization here.
+                        Statement::Query(q) => match *q.body {
+                            SetExpr::Select(s) => {
+                                let mut in_tuples: Vec<Vec<LabeledTypedTuple>> = Vec::new();
+                                let selection =
+                                    s.selection.map(|s| Cmp::try_from_sql(s)).transpose()?;
+
+                                for table in s.from {
+                                    match table.relation {
+                                        TableFactor::Table { mut name, .. } => {
+                                            in_tuples.push(
+                                                addr.send(Select {
+                                                    db_name: msg.db_name.clone(),
+                                                    table_name: name.0.remove(0).value,
+                                                    filter: selection.clone(),
+                                                })
+                                                .await
+                                                .map_err(|e| Error::MailboxError(e))??,
+                                            );
+                                        }
+                                        o => {
+                                            return Err(Error::Unimplemented(Some(format!(
+                                                "{:?}",
+                                                o
+                                            ))));
+                                        }
+                                    }
+                                }
+
+                                results.append(&mut in_tuples);
+                            }
+                            o => {
+                                return Err(Error::Unimplemented(Some(format!("{:?}", o))));
+                            }
+                        },
                         o => {
                             return Err(Error::Unimplemented(Some(format!("{:?}", o))));
                         }
                     }
                 }
+
+                tracing::debug!("query executed with {} results", results.len());
 
                 Ok(results)
             }
