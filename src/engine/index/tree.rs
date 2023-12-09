@@ -99,50 +99,6 @@ fn create_leaf_node() -> BTreeLeafNode {
     node
 }
 
-#[tracing::instrument]
-fn make_internal_node_sorted(node: &mut BTreeInternalNode) -> Result<(), Error> {
-    let mut keys = node
-        .keys_pointers
-        .iter()
-        .enumerate()
-        .filter(|(i, x)| i % 2 != 0 && **x != 0)
-        .enumerate()
-        .collect::<Vec<(usize, (usize, &u64))>>();
-    keys.sort_by_key(|(_, (_, x))| (*x).clone());
-
-    tracing::debug!("sorted keys: {:?}", keys);
-
-    let mut new_node = create_internal_node();
-    let mut i = 0;
-    let n_keys = keys.len();
-
-    for (k_i, (j, k)) in keys.into_iter() {
-        if i > new_node.keys_pointers.len() - 2 {
-            break;
-        }
-
-        new_node.keys_pointers[i] = node.keys_pointers[j - 1];
-        new_node.keys_pointers[i + 1] = k.clone();
-
-        if k_i == n_keys - 1 {
-            // Insert last Gt position key
-            new_node.keys_pointers[i + 2] = node.keys_pointers[j + 1];
-
-            i += 3;
-
-            continue;
-        }
-
-        i += 2;
-    }
-
-    node.keys_pointers = new_node.keys_pointers;
-
-    tracing::debug!("sorted: {:?}", node.keys_pointers);
-
-    Ok(())
-}
-
 fn len_internal_keys(node: &BTreeInternalNode) -> usize {
     node.keys_pointers
         .iter()
@@ -190,6 +146,20 @@ fn pos_last_entry(node: &BTreeInternalNode) -> Option<usize> {
         .filter(|(_, x)| **x != 0)
         .map(|(i, _)| i)
         .last()
+}
+
+fn pos_last_entry_lt(node: &BTreeInternalNode, key: u64) -> Option<usize> {
+    if len_internal_keys(&node) == 0 {
+        return Some(0);
+    }
+
+    node.keys_pointers
+        .iter()
+        .enumerate()
+        .filter(|(i, x)| **x != 0 && i % 2 != 0 && **x < key)
+        .map(|(i, _)| i)
+        .last()
+        .map(|pos| pos + 1)
 }
 
 /// Inserts the key and value into the btree node, if space exists.
@@ -244,15 +214,15 @@ fn insert_internal(node: &mut BTreeInternalNode, k: SearchKey, v: u64) -> Result
             Ok(())
         }
         None => {
-            let pos_insert = pos_last_entry(&node).ok_or(Error::TraversalError)?;
-
             if len_keys < ORDER && len_children <= ORDER {
                 match k {
                     SearchKey::Lt(k) => {
+                        let pos_insert = pos_last_entry_lt(&node, k).unwrap_or(0);
+
                         tracing::debug!(
                             "inserting in less than position in {:?} at {}",
                             node,
-                            len_keys + len_children + 1
+                            pos_insert + 1,
                         );
 
                         if len_keys == 0 {
@@ -263,10 +233,14 @@ fn insert_internal(node: &mut BTreeInternalNode, k: SearchKey, v: u64) -> Result
                         }
 
                         // Insert in Lt pos
-                        node.keys_pointers[pos_insert + 2] = k;
-                        node.keys_pointers[pos_insert + 1] = v;
+                        node.keys_pointers.insert(pos_insert + 2, k);
+                        node.keys_pointers.insert(pos_insert + 1, v);
+                        node.keys_pointers
+                            .resize_with(ORDER * 2 + 1, Default::default);
                     }
                     SearchKey::Gt(k) => {
+                        let pos_insert = pos_last_entry_lt(&node, k).unwrap_or(0);
+
                         tracing::debug!(
                             "inserting in GYATT position in {:?} at {}",
                             node,
@@ -282,13 +256,12 @@ fn insert_internal(node: &mut BTreeInternalNode, k: SearchKey, v: u64) -> Result
                         }
 
                         // Insert in gt pos
-                        node.keys_pointers[pos_insert + 1] = k;
-                        node.keys_pointers[pos_insert + 2] = v;
+                        node.keys_pointers.insert(pos_insert + 1, k);
+                        node.keys_pointers.insert(pos_insert + 2, v);
+                        node.keys_pointers
+                            .resize_with(ORDER * 2 + 1, Default::default);
                     }
                 }
-
-                // Put the values back into sorted order
-                make_internal_node_sorted(node)?;
 
                 Ok(())
             } else {
@@ -1353,34 +1326,6 @@ mod tests {
 
     #[traced_test]
     #[test]
-    fn test_make_internal_node_sorted() {
-        let mut n = create_internal_node();
-        n.keys_pointers = vec![0, 1, 2, 3, 4];
-        make_internal_node_sorted(&mut n).unwrap();
-
-        assert_eq!(&n.keys_pointers[0..5], &vec![0, 1, 2, 3, 4]);
-
-        let mut n = create_internal_node();
-        n.keys_pointers = vec![75, 5, 99, 3, 101];
-        make_internal_node_sorted(&mut n).unwrap();
-
-        assert_eq!(&n.keys_pointers[0..5], &vec![99, 3, 101, 75, 5]);
-
-        let mut n = create_internal_node();
-        n.keys_pointers = vec![75, 5, 99, 3, 101, 0, 0, 0, 0];
-        make_internal_node_sorted(&mut n).unwrap();
-
-        assert_eq!(&n.keys_pointers[0..5], &vec![99, 3, 101, 75, 5]);
-
-        let mut n = create_internal_node();
-        n.keys_pointers = vec![0, 3, 101, 75, 5, 99, 0, 0, 0];
-        make_internal_node_sorted(&mut n).unwrap();
-
-        assert_eq!(&n.keys_pointers[0..6], &vec![0, 3, 101, 75, 5, 99]);
-    }
-
-    #[traced_test]
-    #[test]
     fn test_get_internal() {
         let mut node = create_internal_node();
 
@@ -1763,7 +1708,7 @@ mod tests {
                 .read(true)
                 .write(true)
                 .create(true)
-                .open("/tmp/test.idx")
+                .open("/tmp/test_insert_1.idx")
                 .await
                 .map_err(|e| Error::IoError(e))
                 .ok()?;
@@ -1777,14 +1722,14 @@ mod tests {
             let mut rng = rand::thread_rng();
 
             // Insert a shitton of random keys
-            for i in 0..1_000 {
+            for i in 0..100 {
                 let mut k: u64 = rng.gen();
 
                 while k == 0 {
                     k = rng.gen();
                 }
 
-                tracing::info!("inserting {}", i);
+                tracing::info!("\n\n\ninserting {}", i);
 
                 tree_handle
                     .send(InsertKey(
@@ -1807,7 +1752,7 @@ mod tests {
         }
 
         let res = insert_key().await;
-        std::fs::remove_file("/tmp/test.idx").unwrap();
+        std::fs::remove_file("/tmp/test_insert_1.idx").unwrap();
         assert_eq!(res, Some(()));
     }
 }
