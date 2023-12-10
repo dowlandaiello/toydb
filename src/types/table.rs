@@ -1,8 +1,4 @@
-use super::super::{
-    error::Error,
-    items::{Element, Tuple},
-    util::fs,
-};
+use super::super::{error::Error, owned_items::Tuple, util::fs};
 use serde::{Deserialize, Serialize};
 use sqlparser::ast::{DataType, Expr, Ident, TableConstraint, Value as AstValue};
 use std::{fmt::Display, mem};
@@ -218,11 +214,11 @@ impl TryFrom<Tuple> for CatalogueEntry {
         }
 
         let table_name =
-            String::from_utf8(tup.elements.remove(0).data).map_err(|_| Error::MiscDecodeError)?;
+            String::from_utf8(tup.elements.remove(0)).map_err(|_| Error::MiscDecodeError)?;
         let file_name =
-            String::from_utf8(tup.elements.remove(0).data).map_err(|_| Error::MiscDecodeError)?;
+            String::from_utf8(tup.elements.remove(0)).map_err(|_| Error::MiscDecodeError)?;
         let index_name = {
-            let data = tup.elements.remove(0).data;
+            let data = tup.elements.remove(0);
             if data.len() == 0 {
                 None
             } else {
@@ -230,18 +226,17 @@ impl TryFrom<Tuple> for CatalogueEntry {
             }
         };
         let attr_name =
-            String::from_utf8(tup.elements.remove(0).data).map_err(|_| Error::MiscDecodeError)?;
+            String::from_utf8(tup.elements.remove(0)).map_err(|_| Error::MiscDecodeError)?;
 
         let attr_index_bytes: [u8; mem::size_of::<usize>()] = tup
             .elements
             .remove(0)
-            .data
             .try_into()
             .map_err(|_| Error::MiscDecodeError)?;
         let attr_index: usize = usize::from_le_bytes(attr_index_bytes);
 
-        let ty = tup.elements.remove(0).data.try_into()?;
-        let primary_key: bool = tup.elements.remove(0).data[0] != 0;
+        let ty = tup.elements.remove(0).try_into()?;
+        let primary_key: bool = tup.elements.remove(0)[0] != 0;
 
         Ok(Self {
             table_name,
@@ -271,15 +266,13 @@ impl From<CatalogueEntry> for Tuple {
         Tuple {
             rel_name: fs::CATALOGUE_TABLE_NAME.to_owned(),
             elements: vec![
-                Element { data: table_name },
-                Element { data: file_name },
-                Element { data: index_name },
-                Element { data: attr_name },
-                Element { data: attr_index },
-                Element { data: ty },
-                Element {
-                    data: vec![primary_key],
-                },
+                table_name,
+                file_name,
+                index_name,
+                attr_name,
+                attr_index,
+                ty,
+                vec![primary_key],
             ],
         }
     }

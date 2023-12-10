@@ -1,6 +1,7 @@
 use super::super::{
     error::Error,
-    items::Page,
+    items_capnp::page,
+    owned_items::{Page, Record},
     types::db::{DbName, PageId},
     util::fs,
 };
@@ -8,14 +9,15 @@ use actix::{
     fut::ActorTryFutureExt, Actor, Addr, AsyncContext, Context, Handler, Message,
     ResponseActFuture, ResponseFuture, WrapFuture,
 };
+use capnp::{message::Builder, serialize};
 use futures::future::TryFutureExt;
-use prost::Message as ProstMessage;
-use std::{collections::HashMap, future, sync::Arc};
+use std::{collections::HashMap, future, ops::DerefMut, sync::Arc};
 use tokio::{
     fs::{File, OpenOptions},
     io::{AsyncReadExt, AsyncSeekExt, AsyncWriteExt, SeekFrom},
     sync::Mutex,
 };
+use tokio_util::compat::TokioAsyncReadCompatExt;
 
 /// The size of pages loaded from heap files in bytes.
 pub const PAGE_SIZE: usize = 8_000;
@@ -145,16 +147,47 @@ impl Handler<LoadPage> for DbHandle {
                 .await
                 .map_err(|e| Error::IoError(e))?;
 
+            let handle_compat = TokioAsyncReadCompatExt::compat(handle.deref_mut());
+
             // Load the page
-            let mut buff = [0; PAGE_SIZE];
-            handle
-                .read_exact(&mut buff)
-                .await
-                .map_err(|e| Error::IoError(e))?;
+            let reader = capnp_futures::serialize::read_message(
+                handle_compat,
+                capnp::message::ReaderOptions::new(),
+            )
+            .await
+            .map_err(|e| Error::EncodeError(e))?;
+            let page_ref = reader
+                .get_root::<page::Reader>()
+                .map_err(|e| Error::EncodeError(e))?;
+
+            let space_used = page_ref.get_space_used();
+            let data_reader = page_ref.get_data().map_err(|e| Error::EncodeError(e))?;
+
+            let mut curr = data_reader.try_get(0);
+            let mut data = Vec::new();
+
+            loop {
+                if let Some(curr_record) = curr {
+                    data.push(Record {
+                        size: curr_record.get_size(),
+                        data: curr_record
+                            .get_data()
+                            .map_err(|e| Error::EncodeError(e))?
+                            .to_vec(),
+                    });
+
+                    curr = data_reader.try_get(data.len() as u32);
+                } else {
+                    break;
+                }
+            }
 
             // Decode the page (size delimited)
-            let page = Page::decode_length_delimited(buff.as_slice())
-                .map_err(|e| Error::DecodeError(e))?;
+            let page = Page {
+                space_used: page_ref.get_space_used(),
+                data,
+            };
+
             Ok(page)
         }
         .into_actor(self)
@@ -242,7 +275,18 @@ impl Handler<WritePage> for DbHandle {
                 .await
                 .map_err(|e| Error::IoError(e))?;
 
-            let mut encoded = msg.1.encode_length_delimited_to_vec();
+            let mut builder = Builder::new_default();
+            let mut page_msg = builder.init_root::<page::Builder>();
+            page_msg.set_space_used(msg.1.space_used);
+
+            let mut data = page_msg.init_data(msg.1.data.len() as u32);
+            for (i, record) in msg.1.data.iter().enumerate() {
+                let mut rec = data.reborrow().get(i as u32);
+                rec.set_data(record.data.as_slice());
+                rec.set_size(record.size);
+            }
+
+            let mut encoded = serialize::write_message_to_words(&builder);
 
             if encoded.len() < PAGE_SIZE {
                 let mut padding = vec![0; PAGE_SIZE - encoded.len()];

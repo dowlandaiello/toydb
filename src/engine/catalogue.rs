@@ -1,7 +1,8 @@
 use super::{
     super::{
         error::Error,
-        items::{Record, Tuple},
+        items_capnp::tuple,
+        owned_items::{Record, Tuple},
         types::{
             db::DbName,
             table::{CatalogueEntry, TableName},
@@ -13,7 +14,10 @@ use super::{
     iterator::Next,
 };
 use actix::{Actor, Addr, Context, Handler, Message, ResponseActFuture, WrapFuture};
-use prost::Message as ProstMessage;
+use capnp::{
+    message::{Builder, ReaderOptions},
+    serialize,
+};
 
 /// Inserts the catalogue entry into the catalogue.
 #[derive(Message, Debug)]
@@ -61,7 +65,27 @@ impl Handler<InsertEntry> for Catalogue {
                 );
 
                 let tuple: Tuple = msg.0.into();
-                let enc = tuple.encode_length_delimited_to_vec();
+                let mut builder = Builder::new_default();
+                let mut tup_msg = builder.init_root::<tuple::Builder>();
+
+                {
+                    let mut rel_name = tup_msg
+                        .reborrow()
+                        .init_rel_name(tuple.rel_name.len() as u32);
+                    rel_name.push_str(tuple.rel_name.as_str());
+                }
+
+                {
+                    let mut data = tup_msg
+                        .reborrow()
+                        .init_elements(tuple.elements.len() as u32);
+
+                    for (i, bytes) in tuple.elements.iter().enumerate() {
+                        data.set(i as u32, bytes.as_slice());
+                    }
+                }
+
+                let enc = serialize::write_message_to_words(&builder);
 
                 // Add the entry to the page
                 tracing::debug!(
@@ -132,8 +156,35 @@ impl Handler<GetEntry> for Catalogue {
                     .map_err(|e| Error::MailboxError(e))??;
 
                 // Decode the tuple into a catalogue entry, then return
-                let tup = Tuple::decode_length_delimited(record.data.as_slice())
+                let reader = serialize::read_message_from_flat_slice(
+                    &mut record.data.as_slice(),
+                    ReaderOptions::default(),
+                )
+                .map_err(|e| Error::DecodeError(e))?;
+                let tup_r = reader
+                    .get_root::<tuple::Reader>()
                     .map_err(|e| Error::DecodeError(e))?;
+
+                let rel_name = tup_r
+                    .get_rel_name()
+                    .map_err(|e| Error::DecodeError(e))?
+                    .to_string()
+                    .map_err(|_| Error::MiscDecodeError)?;
+
+                let elements_r = tup_r.get_elements().map_err(|e| Error::DecodeError(e))?;
+                let mut elements = Vec::new();
+                let mut current = elements_r.try_get(0);
+
+                loop {
+                    if let Some(Ok(c)) = current {
+                        elements.push(c.to_vec());
+                        current = elements_r.try_get(elements.len() as u32);
+                    } else {
+                        break;
+                    }
+                }
+
+                let tup = Tuple { rel_name, elements };
                 tup.try_into()
             }
             .into_actor(self),

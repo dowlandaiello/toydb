@@ -1,10 +1,10 @@
-use crate::util::rid;
-
 use super::{
     error::Error,
-    items::{Element, Record, Tuple},
+    items_capnp::{record, tuple},
+    owned_items::{Record, Tuple},
     types::table::{self, CatalogueEntry, LabeledTypedTuple, Ty, TypedTuple, Value},
     util::fs,
+    util::rid,
 };
 use buffer_pool::{BufferPool, DbHandle, GetBuffer};
 use catalogue::{Catalogue, GetEntries, GetEntry, InsertEntry};
@@ -19,7 +19,7 @@ use index::{GetIndex, IndexPool, InsertKey, Iter};
 use iterator::Next;
 
 use actix::{Actor, Addr, AsyncContext, Context, Handler, ResponseActFuture, WrapFuture};
-use prost::Message;
+use capnp::{message::Builder, serialize};
 use sqlparser::{
     ast::{Expr, Ident, SelectItem, SetExpr, Statement, TableFactor},
     dialect::PostgreSqlDialect,
@@ -258,19 +258,29 @@ impl Handler<Insert> for Engine {
                     .map_err(|e| Error::MailboxError(e))?
                     .map_err(|_| Error::MissingCatalogueEntry)?;
 
-                let tuple = Tuple {
-                    rel_name: msg.table_name.clone(),
-                    elements: msg
-                        .values
-                        .iter()
-                        .map(|elem| Element { data: elem.clone() })
-                        .collect::<Vec<Element>>(),
-                };
-                let tuple_enc = tuple.encode_length_delimited_to_vec();
+                let mut builder = Builder::new_default();
+
+                let mut tuple = builder.init_root::<tuple::Builder>();
+
+                {
+                    let mut rel_name = tuple.reborrow().init_rel_name(msg.table_name.len() as u32);
+                    rel_name.push_str(msg.table_name.as_str());
+                }
+
+                {
+                    let mut elements = tuple.reborrow().init_elements(msg.values.len() as u32);
+                    for (i, val) in msg.values.iter().enumerate() {
+                        elements.set(i as u32, val.as_slice());
+                    }
+                }
+
+                let mut tuple_enc = Vec::new();
+                serialize::write_message(&mut tuple_enc, &builder)
+                    .map_err(|e| Error::EncodeError(e))?;
 
                 tracing::info!(
                     "inserting tuple {:?} into table {} in database {}",
-                    tuple,
+                    msg,
                     msg.table_name,
                     msg.db_name
                 );
@@ -439,16 +449,16 @@ impl Handler<Select> for Engine {
                 cat.sort_by_key(|x| x.attr_index);
 
                 // Converts an element to the typed value of the column at its index
-                let conv = |elem: Element, index: usize| -> Result<Value, Error> {
+                let conv = |elem: Vec<u8>, index: usize| -> Result<Value, Error> {
                     let ent = &cat[index];
 
                     match ent.ty {
                         Ty::String => Ok(Value::String(
-                            String::from_utf8(elem.data).map_err(|_| Error::MiscDecodeError)?,
+                            String::from_utf8(elem).map_err(|_| Error::MiscDecodeError)?,
                         )),
                         Ty::Integer => {
                             let int_bytes: [u8; mem::size_of::<i64>()] =
-                                elem.data.try_into().map_err(|_| Error::MiscDecodeError)?;
+                                elem.try_into().map_err(|_| Error::MiscDecodeError)?;
                             Ok(Value::Integer(i64::from_le_bytes(int_bytes)))
                         }
                     }
