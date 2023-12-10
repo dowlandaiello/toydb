@@ -1,6 +1,6 @@
 use actix::MailboxError;
-use capnp::Error as EncodeError;
 use jsonrpc_v2::ErrorLike;
+use prost::{DecodeError, EncodeError};
 use sqlparser::parser::ParserError;
 use std::{error::Error as StdError, fmt};
 use tokio::io::Error as IoError;
@@ -16,7 +16,7 @@ pub enum Error {
     ConversionError,
     RecordNotFound,
     TraversalError,
-    DecodeError(EncodeError),
+    DecodeError(DecodeError),
     EncodeError(EncodeError),
     MiscDecodeError,
     InvalidKey,

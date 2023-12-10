@@ -2,10 +2,7 @@ use super::{
     super::{
         super::{
             error::Error,
-            items_capnp::{b_tree_internal_node, b_tree_leaf_node, record_id_pointer, tuple},
-            owned_items::{
-                BTreeInternalNode, BTreeLeafNode, Page, RecordId, RecordIdPointer, Tuple,
-            },
+            items::{BTreeInternalNode, BTreeLeafNode, Page, RecordId, RecordIdPointer, Tuple},
             util::fs,
         },
         buffer_pool::{DbHandle, LoadPage},
@@ -17,18 +14,14 @@ use actix::{
     Actor, Addr, AsyncContext, Context, Handler, Message, ResponseActFuture, ResponseFuture,
     WrapFuture,
 };
-use capnp::{
-    message::{Builder, ReaderOptions},
-    serialize,
-};
 use futures::future::BoxFuture;
-use std::{collections::HashMap, io::SeekFrom, ops::DerefMut, sync::Arc};
+use prost::Message as ProstMessage;
+use std::{collections::HashMap, io::SeekFrom, sync::Arc};
 use tokio::{
     fs::File,
     io::{AsyncReadExt, AsyncSeekExt, AsyncWriteExt},
     sync::{Mutex, OwnedMutexGuard},
 };
-use tokio_util::compat::TokioAsyncReadCompatExt;
 
 /// The number of children per node in the B+ tree
 pub const ORDER: usize = 4;
@@ -191,22 +184,6 @@ fn insert_internal(node: &mut BTreeInternalNode, k: SearchKey, v: u64) -> Result
 
     for (i, key) in node.keys_pointers.iter().enumerate() {
         if i % 2 == 0 {
-            // This value already exists.
-            if key.clone() == v {
-                match k {
-                    SearchKey::Lt(x) => {
-                        pos_insert = Some(i);
-
-                        break;
-                    }
-                    SearchKey::Gt(x) => {
-                        pos_insert = Some(i);
-
-                        break;
-                    }
-                }
-            }
-
             continue;
         }
 
@@ -429,76 +406,20 @@ fn right_values_internal(node: &BTreeInternalNode) -> Vec<(SearchKey, u64)> {
 fn get_internal(node: &BTreeInternalNode, k: SearchKey) -> Option<u64> {
     let mut pos = None;
 
-    let len = len_internal_child_pointers(node) + len_internal_keys(node);
-
-    tracing::debug!("searching for key {:?} in haystack of length {}", k, len);
-
-    for i in 0..len {
+    for (i, key) in node.keys_pointers.iter().enumerate() {
         if i % 2 == 0 {
             continue;
         }
 
-        let key = &node.keys_pointers[i];
-        let peek_f =
-            node.keys_pointers
-                .get(i + 2)
-                .and_then(|peek| if peek == &0 { None } else { Some(peek) });
-        let peek_b = if i >= 2 {
-            node.keys_pointers
-                .get(i - 2)
-                .and_then(|peek| if peek == &0 { None } else { Some(peek) })
-        } else {
-            None
-        };
-
-        tracing::debug!(
-            "at key {} with peek_f {:?} and peek_b {:?}",
-            key,
-            peek_f,
-            peek_b
-        );
-
         match k {
             SearchKey::Gt(x) => {
-                // If this key is less than x and the next key is greater than it
-                // we've found our spot
-
-                // Alternatively, if this is the last key and it's less than us,
-                // that means we've DEFINITELY found it
-                match peek_f {
-                    Some(peek) => {
-                        if key <= &x && peek > &x {
-                            pos = Some(i + 1);
-                        }
-                    }
-                    None => {
-                        if key <= &x {
-                            pos = Some(i + 1);
-
-                            break;
-                        }
-                    }
+                if x == key.clone() {
+                    pos = Some(i + 1);
                 }
             }
             SearchKey::Lt(x) => {
-                // If this key is greater than x and the previous key is less than it
-                // we've found our spot
-
-                // Alternatively, if this is the first key and it's greater than us,
-                // that means we've DEFINITELy found it
-                match peek_b {
-                    Some(peek) => {
-                        if key > &x && peek <= &x {
-                            pos = Some(i - 1);
-
-                            break;
-                        }
-                    }
-                    None => {
-                        if key > &x {
-                            pos = Some(i - 1);
-                        }
-                    }
+                if x == key.clone() {
+                    pos = Some(i - 1);
                 }
             }
         }
@@ -561,91 +482,85 @@ fn follow_node(
                 return Err((e, handle));
             }
 
-            // Make a reader to read the contents of the node
-            let reader = match capnp_futures::serialize::read_message(
-                TokioAsyncReadCompatExt::compat(handle.deref_mut()),
-                ReaderOptions::default(),
-            )
-            .await
-            .map_err(|e| Error::DecodeError(e))
+            // Peek 10 bytes for the length prefix
+            let mut length_delim_buff: [u8; 10] = [0; 10];
+            if let Err(e) = handle
+                .read_exact(&mut length_delim_buff)
+                .await
+                .map_err(|e| Error::IoError(e))
+            {
+                return Err((e, handle));
+            }
+            let length_delim =
+                match prost::decode_length_delimiter(&mut length_delim_buff.as_slice())
+                    .map_err(|e| Error::DecodeError(e))
+                {
+                    Ok(v) => v,
+                    Err(e) => {
+                        return Err((e, handle));
+                    }
+                };
+            tracing::debug!("got record length {} at pos {}", length_delim, pos);
+            let delim_len = prost::length_delimiter_len(length_delim);
+
+            // Make a buffer for the size of the node
+            let mut node_buff: Vec<u8> = vec![0; length_delim + delim_len];
+
+            // Read into the buff
+            if let Err(e) = handle
+                .seek(SeekFrom::Start(pos as u64))
+                .await
+                .map_err(|e| Error::IoError(e))
+            {
+                return Err((e, handle));
+            }
+            if let Err(e) = handle
+                .read_exact(&mut node_buff)
+                .await
+                .map_err(|e| Error::IoError(e))
+            {
+                return Err((e, handle));
+            }
+
+            tracing::debug!("read node bytes: {:?}", node_buff);
+
+            // Read a node from the buff
+            let node = match BTreeInternalNode::decode_length_delimited(node_buff.as_slice())
+                .map_err(|e| Error::DecodeError(e))
             {
                 Ok(v) => v,
                 Err(e) => {
                     return Err((e, handle));
                 }
             };
-            let n_r = reader
-                .get_root::<b_tree_leaf_node::Reader>()
-                .ok()
-                .and_then(|n_r| {
-                    let keys_r = n_r.get_keys().ok()?;
-                    let keys = keys_r.as_slice()?.to_vec();
 
-                    let disk_pointers_r = n_r.get_disk_pointers().ok()?;
-                    let mut disk_pointers = Vec::new();
-                    let mut curr = disk_pointers_r.try_get(0);
-
-                    loop {
-                        if let Some(c) = curr {
-                            let disk_pointer_r = c;
-
-                            let disk_pointer = RecordIdPointer {
-                                is_empty: disk_pointer_r.get_is_empty(),
-                                page: disk_pointer_r.get_page(),
-                                page_idx: disk_pointer_r.get_page_idx(),
-                            };
-                            disk_pointers.push(disk_pointer);
-
-                            curr = disk_pointers_r.try_get(disk_pointers.len() as u32);
-                        } else {
-                            break;
-                        }
-                    }
-
-                    // Read a node from the buff
-                    Some(BTreeLeafNode {
-                        is_leaf_node: n_r.get_is_leaf_node(),
-                        keys,
-                        disk_pointers,
-                    })
-                });
-
-            let n_internal = reader
-                .get_root::<b_tree_internal_node::Reader>()
-                .ok()
-                .and_then(|n_r| {
-                    let keys_pointers_r = n_r.get_keys_pointers().ok()?;
-
-                    Some(BTreeInternalNode {
-                        is_leaf_node: n_r.get_is_leaf_node(),
-                        keys_pointers: keys_pointers_r.as_slice()?.to_vec(),
-                    })
-                });
-
-            tracing::debug!("decoded node: {:?}", n_r);
+            tracing::debug!("decoded node");
 
             // If the current node is a leaf AND we are looking for a leaf load the node and return the record pointer
-            if let Some(node) = n_r {
-                if target == SearchTarget::LeafNode {
-                    tracing::debug!("found candidate leaf node: {:?}", node);
+            if node.is_leaf_node && target == SearchTarget::LeafNode {
+                let node = match BTreeLeafNode::decode_length_delimited(node_buff.as_slice())
+                    .map_err(|e| Error::DecodeError(e))
+                {
+                    Ok(v) => v,
+                    Err(e) => {
+                        return Err((e, handle));
+                    }
+                };
 
-                    return Ok((Some(SearchResult::LeafNode(node)), pos, handle));
-                } else if target == SearchTarget::InternalNode {
-                    tracing::debug!("no candidate node found. giving up");
+                tracing::debug!("found candidate leaf node: {:?}", node);
 
-                    return Ok((None, pos, handle));
-                }
-            } else if let Some(node) = n_internal.clone() {
-                if target == SearchTarget::InternalNode {
-                    return Ok((Some(SearchResult::InternalNode(node)), pos, handle));
-                }
-            } else {
+                return Ok((Some(SearchResult::LeafNode(node)), pos, handle));
+            } else if node.is_leaf_node && target == SearchTarget::InternalNode {
                 tracing::debug!("no candidate node found. giving up");
 
                 return Ok((None, pos, handle));
+            } else if target == SearchTarget::InternalNode {
+                tracing::debug!("found candidate internal node: {:?}", node);
+
+                return Ok((Some(SearchResult::InternalNode(node)), pos, handle));
             }
 
-            n_internal
+            node
         };
 
         tracing::debug!(
@@ -653,19 +568,13 @@ fn follow_node(
             node
         );
 
-        let node = if let Some(node) = node {
-            node
-        } else {
-            return Ok((None, pos, handle));
-        };
-
         let next = if let Some(n) = get_internal(&node, SearchKey::Gt(key)) {
             tracing::debug!("found next node to probe for key {}: {:?}", key, n);
 
             n
         } else if target == SearchTarget::LeafNode {
             tracing::debug!(
-                "we were looking for a next node to probe for key {}, but no leaf nodes are available", key
+                "we were looking for a next node to probe, but no leaf nodes are available"
             );
 
             return Ok((None, pos, handle));
@@ -706,105 +615,81 @@ impl TreeHandle {
                 return Err((Error::IoError(e), handle));
             }
 
-            let reader = match capnp_futures::serialize::read_message(
-                TokioAsyncReadCompatExt::compat(handle.deref_mut()),
-                ReaderOptions::default(),
-            )
-            .await
-            .map_err(|e| Error::DecodeError(e))
-            {
+            // Peek 10 bytes for the length prefix
+            let mut length_delim_buff: [u8; 10] = [0; 10];
+            if let Err(e) = handle.read_exact(&mut length_delim_buff).await {
+                return Err((Error::IoError(e), handle));
+            }
+            let length_delim =
+                match prost::decode_length_delimiter(&mut length_delim_buff.as_slice()) {
+                    Ok(v) => v,
+                    Err(e) => {
+                        return Err((Error::DecodeError(e), handle));
+                    }
+                };
+            let length_delim_len = prost::length_delimiter_len(length_delim);
+
+            // Make a buffer for the size of the node
+            let mut node_buff: Vec<u8> = vec![0; length_delim + length_delim_len];
+
+            // Read into the buff
+            if let Err(e) = handle.seek(SeekFrom::Start(curr_pos as u64)).await {
+                return Err((Error::IoError(e), handle));
+            }
+            if let Err(e) = handle.read_exact(&mut node_buff).await {
+                return Err((Error::IoError(e), handle));
+            }
+
+            // Read a node from the buff
+            let node = match BTreeInternalNode::decode_length_delimited(node_buff.as_slice()) {
                 Ok(v) => v,
                 Err(e) => {
-                    return Err((e, handle));
+                    return Err((Error::DecodeError(e), handle));
                 }
             };
-
-            let n_r = reader
-                .get_root::<b_tree_leaf_node::Reader>()
-                .ok()
-                .and_then(|n_r| {
-                    let keys_r = n_r.get_keys().ok()?;
-                    let keys = keys_r.as_slice()?.to_vec();
-
-                    let disk_pointers_r = n_r.get_disk_pointers().ok()?;
-                    let mut disk_pointers = Vec::new();
-                    let mut curr = disk_pointers_r.try_get(0);
-
-                    loop {
-                        if let Some(c) = curr {
-                            let disk_pointer_r = c;
-
-                            let disk_pointer = RecordIdPointer {
-                                is_empty: disk_pointer_r.get_is_empty(),
-                                page: disk_pointer_r.get_page(),
-                                page_idx: disk_pointer_r.get_page_idx(),
-                            };
-                            disk_pointers.push(disk_pointer);
-
-                            curr = disk_pointers_r.try_get(disk_pointers.len() as u32);
-                        } else {
-                            break;
-                        }
+            if node.is_leaf_node {
+                let node = match BTreeLeafNode::decode_length_delimited(node_buff.as_slice()) {
+                    Ok(v) => v,
+                    Err(e) => {
+                        return Err((Error::DecodeError(e), handle));
                     }
+                };
 
-                    // Read a node from the buff
-                    Some(BTreeLeafNode {
-                        is_leaf_node: n_r.get_is_leaf_node(),
-                        keys,
-                        disk_pointers,
-                    })
-                });
-
-            let n_internal = reader
-                .get_root::<b_tree_internal_node::Reader>()
-                .ok()
-                .and_then(|n_r| {
-                    let keys_pointers_r = n_r.get_keys_pointers().ok()?;
-
-                    Some(BTreeInternalNode {
-                        is_leaf_node: n_r.get_is_leaf_node(),
-                        keys_pointers: keys_pointers_r.as_slice()?.to_vec(),
-                    })
-                });
-
-            if let Some(node) = n_r {
                 tracing::debug!("finished path with leaf node: {:?}", node);
 
                 return Ok((vec![node], handle));
-            } else if let Some(node) = n_internal {
-                tracing::debug!("collecting children for internal node: {:?}", node);
-
-                let mut leaves = Vec::new();
-
-                // Get all child nodes and join
-                for c_pointer in node
-                    .keys_pointers
-                    .iter()
-                    .enumerate()
-                    .filter(|(i, _)| i % 2 == 0)
-                    .filter(|(_, ptr)| **ptr != 0)
-                    .map(|(_, x)| x.clone())
-                {
-                    tracing::debug!("hopping to child node {}", c_pointer);
-
-                    let (mut c_pointer_children, got_handle) =
-                        match Self::collect_nodes(handle, c_pointer).await {
-                            Ok(v) => v,
-                            Err(e) => {
-                                return Err(e);
-                            }
-                        };
-
-                    tracing::debug!("got child nodes {:?}", c_pointer_children);
-
-                    leaves.append(&mut c_pointer_children);
-                    handle = got_handle;
-                }
-
-                Ok((leaves, handle))
-            } else {
-                Err((Error::TraversalError, handle))
             }
+
+            tracing::debug!("collecting children for internal node: {:?}", node);
+
+            let mut leaves = Vec::new();
+
+            // Get all child nodes and join
+            for c_pointer in node
+                .keys_pointers
+                .iter()
+                .enumerate()
+                .filter(|(i, _)| i % 2 == 0)
+                .filter(|(_, ptr)| **ptr != 0)
+                .map(|(_, x)| x.clone())
+            {
+                tracing::debug!("hopping to child node {}", c_pointer);
+
+                let (mut c_pointer_children, got_handle) =
+                    match Self::collect_nodes(handle, c_pointer).await {
+                        Ok(v) => v,
+                        Err(e) => {
+                            return Err(e);
+                        }
+                    };
+
+                tracing::debug!("got child nodes {:?}", c_pointer_children);
+
+                leaves.append(&mut c_pointer_children);
+                handle = got_handle;
+            }
+
+            Ok((leaves, handle))
         })
     }
 
@@ -820,25 +705,13 @@ impl TreeHandle {
         tracing::debug!("inserting leaf node and internal node");
 
         let mut root_node = create_internal_node();
-
-        let mut builder = Builder::new_default();
-        let mut node_msg = builder.init_root::<b_tree_internal_node::Builder>();
-        {
-            node_msg
-                .reborrow()
-                .init_keys_pointers((ORDER * 2 + 1) as u32);
-        }
-
-        let body_len = match node_msg.total_size().map_err(|e| Error::EncodeError(e)) {
-            Ok(v) => v,
-            Err(e) => {
-                return Err((e, f));
-            }
-        }
-        .word_count
-            * 2;
-
-        if let Err(e) = insert_internal(&mut root_node, SearchKey::Gt(msg.0), body_len) {
+        let body_len = root_node.encoded_len();
+        let len_len = prost::length_delimiter_len(body_len);
+        if let Err(e) = insert_internal(
+            &mut root_node,
+            SearchKey::Gt(msg.0),
+            (body_len + len_len) as u64,
+        ) {
             return Err((e, f));
         };
 
@@ -860,50 +733,18 @@ impl TreeHandle {
             "inserting root node {:?} at pos {} with length {}",
             root_node,
             0,
-            body_len,
+            body_len + len_len
         );
 
-        let mut keys_pointers = node_msg
-            .reborrow()
-            .init_keys_pointers((ORDER * 2 + 1) as u32);
-
-        // Set the keys_pointers in the encoded message to our owned ones
-        for (i, k) in root_node.keys_pointers.iter().enumerate() {
-            keys_pointers.set(i as u32, k.clone());
-        }
-
         if let Err(e) = f
-            .write_all(serialize::write_message_to_words(&builder).as_slice())
+            .write_all(root_node.encode_length_delimited_to_vec().as_slice())
             .await
             .map_err(|e| Error::IoError(e))
         {
             return Err((e, f));
         }
-
-        let mut builder = Builder::new_default();
-        let mut node_msg = builder.init_root::<b_tree_leaf_node::Builder>();
-
-        {
-            let mut keys = node_msg.reborrow().init_keys(ORDER as u32);
-
-            for (i, k) in leaf_node.keys.into_iter().enumerate() {
-                keys.set(i as u32, k);
-            }
-        }
-
-        {
-            let mut disk_pointers = node_msg.reborrow().init_disk_pointers(ORDER as u32);
-
-            for (i, k) in leaf_node.disk_pointers.into_iter().enumerate() {
-                let mut rid = disk_pointers.reborrow().get(i as u32);
-                rid.set_is_empty(k.is_empty);
-                rid.set_page(k.page);
-                rid.set_page_idx(k.page_idx);
-            }
-        }
-
         if let Err(e) = f
-            .write_all(serialize::write_message_to_words(&builder).as_slice())
+            .write_all(leaf_node.encode_length_delimited_to_vec().as_slice())
             .await
             .map_err(|e| Error::IoError(e))
         {
@@ -946,35 +787,9 @@ impl TreeHandle {
             return Err((e, f));
         }
 
-        let mut builder = Builder::new_default();
-        let mut node_msg = builder.init_root::<b_tree_leaf_node::Builder>();
-
-        {
-            let mut keys = node_msg.reborrow().init_keys(ORDER as u32);
-
-            for (i, k) in n.keys.iter().enumerate() {
-                keys.set(i as u32, k.clone());
-            }
-        }
-
-        {
-            let mut disk_pointers = node_msg.reborrow().init_disk_pointers(ORDER as u32);
-
-            for (i, k) in n.disk_pointers.iter().enumerate() {
-                let mut rid = disk_pointers.reborrow().get(i as u32);
-                rid.set_is_empty(k.is_empty);
-                rid.set_page(k.page);
-                rid.set_page_idx(k.page_idx);
-            }
-        }
-
-        let encoded = serialize::write_message_to_words(&builder);
-
         tracing::debug!(
-            "writing updated parent node {:?} to disk at pos {} with length {}",
-            n,
-            candidate_pos,
-            encoded.len()
+            "writing updated parent node to disk at pos {}",
+            candidate_pos
         );
 
         // Write the node
@@ -982,7 +797,10 @@ impl TreeHandle {
             return Err((Error::IoError(e), f));
         }
 
-        if let Err(e) = f.write_all(encoded.as_slice()).await {
+        if let Err(e) = f
+            .write_all(n.encode_length_delimited_to_vec().as_slice())
+            .await
+        {
             return Err((Error::IoError(e), f));
         }
 
@@ -1015,22 +833,9 @@ impl TreeHandle {
             }
         };
 
-        let mut builder_internal = Builder::new_default();
-        let mut node_msg = builder_internal.init_root::<b_tree_internal_node::Builder>();
-        {
-            node_msg
-                .reborrow()
-                .init_keys_pointers((ORDER * 2 + 1) as u32);
-        }
-
-        let body_len = match node_msg.total_size().map_err(|e| Error::EncodeError(e)) {
-            Ok(v) => v,
-            Err(e) => {
-                return Err((e, f));
-            }
-        }
-        .word_count
-            * 2;
+        let n_size = n.encoded_len();
+        let len_len = prost::length_delimiter_len(n_size);
+        let total_n_size = n_size + len_len;
 
         // Make a new leaf node
         let mut leaf = create_leaf_node();
@@ -1046,28 +851,6 @@ impl TreeHandle {
             return Err((e, f));
         }
 
-        let mut builder = Builder::new_default();
-        let mut node_msg_leaf = builder.init_root::<b_tree_leaf_node::Builder>();
-
-        {
-            let mut keys = node_msg_leaf.reborrow().init_keys(ORDER as u32);
-
-            for (i, k) in leaf.keys.iter().enumerate() {
-                keys.set(i as u32, k.clone());
-            }
-        }
-
-        {
-            let mut disk_pointers = node_msg_leaf.reborrow().init_disk_pointers(ORDER as u32);
-
-            for (i, k) in leaf.disk_pointers.iter().enumerate() {
-                let mut rid = disk_pointers.reborrow().get(i as u32);
-                rid.set_is_empty(k.is_empty);
-                rid.set_page(k.page);
-                rid.set_page_idx(k.page_idx);
-            }
-        }
-
         let insert_pos = match f.seek(SeekFrom::End(0)).await {
             Err(e) => {
                 return Err((Error::IoError(e), f));
@@ -1075,11 +858,11 @@ impl TreeHandle {
             Ok(v) => v,
         };
 
-        tracing::debug!("writing leaf node {:?} at disk pos {}", leaf, insert_pos);
+        tracing::debug!("writing leaf node {:?} at disk pos {}", leaf, insert_pos,);
 
         // Write the leaf node
         if let Err(e) = f
-            .write_all(serialize::write_message_to_words(&builder).as_slice())
+            .write_all(leaf.encode_length_delimited_to_vec().as_slice())
             .await
         {
             return Err((Error::IoError(e), f));
@@ -1093,7 +876,7 @@ impl TreeHandle {
             "writing node {:?} at disk pos {} with length {}",
             n,
             candidate_pos,
-            body_len,
+            total_n_size
         );
 
         // Write the node
@@ -1101,12 +884,8 @@ impl TreeHandle {
             return Err((Error::IoError(e), f));
         }
 
-        node_msg
-            .reborrow()
-            .init_keys_pointers((ORDER * 2 + 1) as u32);
-
         if let Err(e) = f
-            .write_all(serialize::write_message_to_words(&builder_internal).as_slice())
+            .write_all(n.encode_length_delimited_to_vec().as_slice())
             .await
         {
             return Err((Error::IoError(e), f));
@@ -1149,35 +928,9 @@ impl TreeHandle {
         let mut left_n = create_internal_node();
         let mut right_n = create_internal_node();
 
-        let mut left_builder = Builder::new_default();
-        let mut node_msg_left = left_builder.init_root::<b_tree_internal_node::Builder>();
-
-        let mut right_builder = Builder::new_default();
-        let mut node_msg_right = right_builder.init_root::<b_tree_internal_node::Builder>();
-
-        {
-            node_msg_left
-                .reborrow()
-                .init_keys_pointers((ORDER * 2 + 1) as u32);
-        }
-
-        {
-            node_msg_right
-                .reborrow()
-                .init_keys_pointers((ORDER * 2 + 1) as u32);
-        }
-
-        let total_left_len = match node_msg_left
-            .total_size()
-            .map_err(|e| Error::EncodeError(e))
-        {
-            Ok(v) => v,
-            Err(e) => {
-                return Err((e, f));
-            }
-        }
-        .word_count
-            * 2;
+        let left_len = left_n.encoded_len();
+        let left_len_len = prost::length_delimiter_len(left_len);
+        let total_left_len = left_len + left_len_len;
 
         for (k, v) in left {
             if let Err(e) = insert_internal(&mut left_n, k, v) {
@@ -1196,54 +949,21 @@ impl TreeHandle {
 
         // Create a new parent node
         let mut parent = create_internal_node();
+        let len = parent.encoded_len();
+        let len_len = prost::length_delimiter_len(len);
+        let total_parent_len = len + len_len;
 
-        // Insert the child nodes at the end of the file
-        let insertion_pos = match f.seek(SeekFrom::End(0)).await {
-            Ok(v) => v,
-            Err(e) => {
-                return Err((Error::IoError(e), f));
-            }
-        };
-
-        let mut keys_pointers = node_msg_left
-            .reborrow()
-            .init_keys_pointers((ORDER * 2 + 1) as u32);
-
-        // Set the keys_pointers in the encoded message to our owned ones
-        for (i, k) in left_n.keys_pointers.iter().enumerate() {
-            keys_pointers.set(i as u32, k.clone());
-        }
-
-        let mut keys_pointers = node_msg_right
-            .reborrow()
-            .init_keys_pointers((ORDER * 2 + 1) as u32);
-
-        // Set the keys_pointers in the encoded message to our owned ones
-        for (i, k) in right_n.keys_pointers.iter().enumerate() {
-            keys_pointers.set(i as u32, k.clone());
-        }
-
-        if let Err(e) = f
-            .write_all(serialize::write_message_to_words(&left_builder).as_slice())
-            .await
-        {
-            return Err((Error::IoError(e), f));
-        }
-
-        if let Err(e) = f
-            .write_all(serialize::write_message_to_words(&right_builder).as_slice())
-            .await
-        {
-            return Err((Error::IoError(e), f));
-        }
-
-        if let Err(e) = insert_internal(&mut parent, SearchKey::Lt(med), insertion_pos as u64) {
+        if let Err(e) = insert_internal(
+            &mut parent,
+            SearchKey::Lt(med),
+            candidate_pos as u64 + total_parent_len as u64,
+        ) {
             return Err((e, f));
         }
         if let Err(e) = insert_internal(
             &mut parent,
             SearchKey::Gt(med),
-            insertion_pos as u64 + total_left_len as u64,
+            candidate_pos as u64 + total_parent_len as u64 + total_left_len as u64,
         ) {
             return Err((e, f));
         }
@@ -1252,22 +972,27 @@ impl TreeHandle {
         if let Err(e) = f.seek(SeekFrom::Start(candidate_pos)).await {
             return Err((Error::IoError(e), f));
         }
-
-        let mut builder = Builder::new_default();
-        let mut node_msg = builder.init_root::<b_tree_internal_node::Builder>();
+        if let Err(e) = f
+            .write_all(parent.encode_length_delimited_to_vec().as_slice())
+            .await
         {
-            let mut keys_pointers = node_msg
-                .reborrow()
-                .init_keys_pointers((ORDER * 2 + 1) as u32);
+            return Err((Error::IoError(e), f));
+        }
 
-            // Set the keys_pointers in the encoded message to our owned ones
-            for (i, k) in parent.keys_pointers.iter().enumerate() {
-                keys_pointers.set(i as u32, k.clone());
-            }
+        // Insert the child nodes at the end of the file
+        if let Err(e) = f.seek(SeekFrom::End(0)).await {
+            return Err((Error::IoError(e), f));
         }
 
         if let Err(e) = f
-            .write_all(serialize::write_message_to_words(&builder).as_slice())
+            .write_all(left_n.encode_length_delimited_to_vec().as_slice())
+            .await
+        {
+            return Err((Error::IoError(e), f));
+        }
+
+        if let Err(e) = f
+            .write_all(right_n.encode_length_delimited_to_vec().as_slice())
             .await
         {
             return Err((Error::IoError(e), f));
@@ -1378,9 +1103,7 @@ impl Handler<InsertKey> for TreeHandle {
 
                     // 3. Split the internal node, and try again
                     match Self::split_internal_node(f, &msg).await {
-                        Ok(_) => {
-                            tracing::debug!("split node successfully");
-                        }
+                        Ok(_) => {}
                         Err((e, _)) => {
                             return Err(e);
                         }
@@ -1532,31 +1255,7 @@ impl Handler<Next> for TreeHandleIterator {
                 let page = res.ok()?;
 
                 let tup_bytes = page.data.get(rid.page_idx as usize)?;
-
-                // Decode the tuple into a catalogue entry, then return
-                let reader = serialize::read_message_from_flat_slice(
-                    &mut tup_bytes.data.as_slice(),
-                    ReaderOptions::default(),
-                )
-                .ok()?;
-                let tup_r = reader.get_root::<tuple::Reader>().ok()?;
-
-                let rel_name = tup_r.get_rel_name().ok()?.to_string().ok()?;
-
-                let elements_r = tup_r.get_elements().ok()?;
-                let mut elements = Vec::new();
-                let mut current = elements_r.try_get(0);
-
-                loop {
-                    if let Some(Ok(c)) = current {
-                        elements.push(c.to_vec());
-                        current = elements_r.try_get(elements.len() as u32);
-                    } else {
-                        break;
-                    }
-                }
-
-                let tup = Tuple { rel_name, elements };
+                let tup = Tuple::decode_length_delimited(tup_bytes.data.as_slice()).ok()?;
 
                 Some(tup)
             }
@@ -1838,11 +1537,8 @@ mod tests {
 
             let mut rng = rand::thread_rng();
 
-            // Values to look for for each inserted key
-            let mut k_v: Vec<(u64, RecordId)> = Vec::new();
-
             // Insert a shitton of random keys
-            for i in 0..5 {
+            for i in 0..100 {
                 let mut k: u64 = rng.gen();
 
                 while k == 0 {

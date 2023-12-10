@@ -1,8 +1,7 @@
 use super::{
     super::{
         error::Error,
-        items_capnp::tuple,
-        owned_items::{Record, RecordId, Tuple},
+        items::{Record, RecordId, Tuple},
         types::db::DbName,
     },
     buffer_pool::{DbHandle, LoadHead, LoadPage, NewPage, WritePage, PAGE_SIZE},
@@ -12,7 +11,7 @@ use actix::{
     Actor, ActorTryFutureExt, Addr, AsyncContext, Context, Handler, Message, ResponseActFuture,
     ResponseFuture, WrapFuture,
 };
-use capnp::{message::ReaderOptions, serialize};
+use prost::Message as ProstMessage;
 use std::{collections::HashMap, future, sync::Arc};
 use tokio::sync::Mutex;
 
@@ -238,31 +237,7 @@ impl Handler<Next> for HeapHandleIterator {
                 // Update the current RID
                 curr_rid.page_idx += 1;
 
-                // Decode the tuple into a catalogue entry, then return
-                let reader = serialize::read_message_from_flat_slice(
-                    &mut val.data.as_slice(),
-                    ReaderOptions::default(),
-                )
-                .ok()?;
-                let tup_r = reader.get_root::<tuple::Reader>().ok()?;
-
-                let rel_name = tup_r.get_rel_name().ok()?.to_string().ok()?;
-
-                let elements_r = tup_r.get_elements().ok()?;
-                let mut elements = Vec::new();
-                let mut current = elements_r.try_get(0);
-
-                loop {
-                    if let Some(Ok(c)) = current {
-                        elements.push(c.to_vec());
-                        current = elements_r.try_get(elements.len() as u32);
-                    } else {
-                        break;
-                    }
-                }
-
-                let tup = Tuple { rel_name, elements };
-
+                let tup = Tuple::decode_length_delimited(val.data.as_slice()).ok()?;
                 tracing::debug!("decoded tuple {:?}", tup);
 
                 Some(tup)

@@ -1,7 +1,6 @@
-fn main() {
-    capnpc::CompilerCommand::new()
-        .src_prefix("schema")
-        .file("schema/items.capnp")
-        .run()
-        .expect("schema compiler command");
+use std::io::Result;
+
+fn main() -> Result<()> {
+    prost_build::compile_protos(&["src/items.proto"], &["src/"])?;
+    Ok(())
 }

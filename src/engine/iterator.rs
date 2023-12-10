@@ -1,4 +1,4 @@
-use super::super::owned_items::Tuple;
+use super::super::items::Tuple;
 use actix::Message;
 
 /// A message requesting the next tuple from the iterator.
