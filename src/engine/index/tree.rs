@@ -2,8 +2,10 @@ use super::{
     super::{
         super::{
             error::Error,
-            items::{BTreeInternalNode, BTreeLeafNode, Page, RecordId, RecordIdPointer, Tuple},
+            items::{Page, RecordId, Tuple},
+            owned_items::{BTreeInternalNode, BTreeLeafNode, RecordIdPointer},
             util::fs,
+            ORDER,
         },
         buffer_pool::{DbHandle, LoadPage},
         iterator::Next,
@@ -22,9 +24,6 @@ use tokio::{
     io::{AsyncReadExt, AsyncSeekExt, AsyncWriteExt},
     sync::{Mutex, OwnedMutexGuard},
 };
-
-/// The number of children per node in the B+ tree
-pub const ORDER: usize = 4;
 
 /// Gets the next leaf node from the seeker identified by the ID.
 #[derive(Message)]
@@ -78,7 +77,7 @@ impl From<RecordIdPointer> for RecordId {
 
 fn create_internal_node() -> BTreeInternalNode {
     let mut node = BTreeInternalNode::default();
-    node.keys_pointers = vec![0; ORDER * 2 + 1];
+    node.keys_pointers = [0; ORDER * 2 + 1];
 
     node
 }
@@ -86,15 +85,12 @@ fn create_internal_node() -> BTreeInternalNode {
 fn create_leaf_node() -> BTreeLeafNode {
     let mut node = BTreeLeafNode::default();
     node.is_leaf_node = true;
-    node.keys = vec![0; ORDER];
-    node.disk_pointers = vec![
-        {
-            let mut r = RecordIdPointer::default();
-            r.is_empty = true;
-            r
-        };
-        ORDER
-    ];
+    node.keys = [0; ORDER];
+    node.disk_pointers = [{
+        let mut r = RecordIdPointer::default();
+        r.is_empty = true;
+        r
+    }; ORDER];
 
     node
 }
@@ -205,6 +201,8 @@ fn insert_internal(node: &mut BTreeInternalNode, k: SearchKey, v: u64) -> Result
         }
     }
 
+    let mut keys_pointers = node.keys_pointers.to_vec();
+
     match pos_insert {
         Some(pos_insert) => {
             tracing::debug!("key already exists; inserting in position {}", pos_insert);
@@ -233,10 +231,11 @@ fn insert_internal(node: &mut BTreeInternalNode, k: SearchKey, v: u64) -> Result
                         }
 
                         // Insert in Lt pos
-                        node.keys_pointers.insert(pos_insert + 2, k);
-                        node.keys_pointers.insert(pos_insert + 1, v);
-                        node.keys_pointers
-                            .resize_with(ORDER * 2 + 1, Default::default);
+                        keys_pointers.insert(pos_insert + 2, k);
+                        keys_pointers.insert(pos_insert + 1, v);
+                        keys_pointers.resize_with(ORDER * 2 + 1, Default::default);
+                        node.keys_pointers =
+                            keys_pointers.try_into().map_err(|_| Error::EncodeError)?;
                     }
                     SearchKey::Gt(k) => {
                         let pos_insert = pos_last_entry_lt(&node, k).unwrap_or(0);
@@ -256,10 +255,11 @@ fn insert_internal(node: &mut BTreeInternalNode, k: SearchKey, v: u64) -> Result
                         }
 
                         // Insert in gt pos
-                        node.keys_pointers.insert(pos_insert + 1, k);
-                        node.keys_pointers.insert(pos_insert + 2, v);
-                        node.keys_pointers
-                            .resize_with(ORDER * 2 + 1, Default::default);
+                        keys_pointers.insert(pos_insert + 1, k);
+                        keys_pointers.insert(pos_insert + 2, v);
+                        keys_pointers.resize_with(ORDER * 2 + 1, Default::default);
+                        node.keys_pointers =
+                            keys_pointers.try_into().map_err(|_| Error::EncodeError)?;
                     }
                 }
 
@@ -482,38 +482,10 @@ fn follow_node(
                 return Err((e, handle));
             }
 
-            // Peek 10 bytes for the length prefix
-            let mut length_delim_buff: [u8; 10] = [0; 10];
-            if let Err(e) = handle
-                .read_exact(&mut length_delim_buff)
-                .await
-                .map_err(|e| Error::IoError(e))
-            {
-                return Err((e, handle));
-            }
-            let length_delim =
-                match prost::decode_length_delimiter(&mut length_delim_buff.as_slice())
-                    .map_err(|e| Error::DecodeError(e))
-                {
-                    Ok(v) => v,
-                    Err(e) => {
-                        return Err((e, handle));
-                    }
-                };
-            tracing::debug!("got record length {} at pos {}", length_delim, pos);
-            let delim_len = prost::length_delimiter_len(length_delim);
-
             // Make a buffer for the size of the node
-            let mut node_buff: Vec<u8> = vec![0; length_delim + delim_len];
+            let mut node_buff: Vec<u8> = vec![0; BTreeInternalNode::encoded_len()];
 
             // Read into the buff
-            if let Err(e) = handle
-                .seek(SeekFrom::Start(pos as u64))
-                .await
-                .map_err(|e| Error::IoError(e))
-            {
-                return Err((e, handle));
-            }
             if let Err(e) = handle
                 .read_exact(&mut node_buff)
                 .await
@@ -525,9 +497,7 @@ fn follow_node(
             tracing::debug!("read node bytes: {:?}", node_buff);
 
             // Read a node from the buff
-            let node = match BTreeInternalNode::decode_length_delimited(node_buff.as_slice())
-                .map_err(|e| Error::DecodeError(e))
-            {
+            let node = match BTreeInternalNode::decode_length_delimited(node_buff.as_slice()) {
                 Ok(v) => v,
                 Err(e) => {
                     return Err((e, handle));
@@ -538,9 +508,28 @@ fn follow_node(
 
             // If the current node is a leaf AND we are looking for a leaf load the node and return the record pointer
             if node.is_leaf_node && target == SearchTarget::LeafNode {
-                let node = match BTreeLeafNode::decode_length_delimited(node_buff.as_slice())
-                    .map_err(|e| Error::DecodeError(e))
+                // Get the current node
+                if let Err(e) = handle
+                    .seek(SeekFrom::Start(pos as u64))
+                    .await
+                    .map_err(|e| Error::IoError(e))
                 {
+                    return Err((e, handle));
+                }
+
+                // Make a buffer for the size of the node
+                let mut node_buff: Vec<u8> = vec![0; BTreeLeafNode::encoded_len()];
+
+                // Read into the buff
+                if let Err(e) = handle
+                    .read_exact(&mut node_buff)
+                    .await
+                    .map_err(|e| Error::IoError(e))
+                {
+                    return Err((e, handle));
+                }
+
+                let node = match BTreeLeafNode::decode_length_delimited(node_buff.as_slice()) {
                     Ok(v) => v,
                     Err(e) => {
                         return Err((e, handle));
@@ -615,27 +604,9 @@ impl TreeHandle {
                 return Err((Error::IoError(e), handle));
             }
 
-            // Peek 10 bytes for the length prefix
-            let mut length_delim_buff: [u8; 10] = [0; 10];
-            if let Err(e) = handle.read_exact(&mut length_delim_buff).await {
-                return Err((Error::IoError(e), handle));
-            }
-            let length_delim =
-                match prost::decode_length_delimiter(&mut length_delim_buff.as_slice()) {
-                    Ok(v) => v,
-                    Err(e) => {
-                        return Err((Error::DecodeError(e), handle));
-                    }
-                };
-            let length_delim_len = prost::length_delimiter_len(length_delim);
-
             // Make a buffer for the size of the node
-            let mut node_buff: Vec<u8> = vec![0; length_delim + length_delim_len];
+            let mut node_buff: Vec<u8> = vec![0; BTreeInternalNode::encoded_len()];
 
-            // Read into the buff
-            if let Err(e) = handle.seek(SeekFrom::Start(curr_pos as u64)).await {
-                return Err((Error::IoError(e), handle));
-            }
             if let Err(e) = handle.read_exact(&mut node_buff).await {
                 return Err((Error::IoError(e), handle));
             }
@@ -644,14 +615,24 @@ impl TreeHandle {
             let node = match BTreeInternalNode::decode_length_delimited(node_buff.as_slice()) {
                 Ok(v) => v,
                 Err(e) => {
-                    return Err((Error::DecodeError(e), handle));
+                    return Err((e, handle));
                 }
             };
             if node.is_leaf_node {
+                // Go back to the beginning and read the leaf node
+                if let Err(e) = handle.seek(SeekFrom::Start(curr_pos)).await {
+                    return Err((Error::IoError(e), handle));
+                }
+
+                let mut node_buff: Vec<u8> = vec![0; BTreeLeafNode::encoded_len()];
+                if let Err(e) = handle.read_exact(&mut node_buff).await {
+                    return Err((Error::IoError(e), handle));
+                }
+
                 let node = match BTreeLeafNode::decode_length_delimited(node_buff.as_slice()) {
                     Ok(v) => v,
                     Err(e) => {
-                        return Err((Error::DecodeError(e), handle));
+                        return Err((e, handle));
                     }
                 };
 
@@ -705,13 +686,8 @@ impl TreeHandle {
         tracing::debug!("inserting leaf node and internal node");
 
         let mut root_node = create_internal_node();
-        let body_len = root_node.encoded_len();
-        let len_len = prost::length_delimiter_len(body_len);
-        if let Err(e) = insert_internal(
-            &mut root_node,
-            SearchKey::Gt(msg.0),
-            (body_len + len_len) as u64,
-        ) {
+        let body_len = BTreeInternalNode::encoded_len();
+        if let Err(e) = insert_internal(&mut root_node, SearchKey::Gt(msg.0), body_len as u64) {
             return Err((e, f));
         };
 
@@ -733,7 +709,7 @@ impl TreeHandle {
             "inserting root node {:?} at pos {} with length {}",
             root_node,
             0,
-            body_len + len_len
+            body_len
         );
 
         if let Err(e) = f
@@ -833,9 +809,7 @@ impl TreeHandle {
             }
         };
 
-        let n_size = n.encoded_len();
-        let len_len = prost::length_delimiter_len(n_size);
-        let total_n_size = n_size + len_len;
+        let n_size = BTreeInternalNode::encoded_len();
 
         // Make a new leaf node
         let mut leaf = create_leaf_node();
@@ -876,7 +850,7 @@ impl TreeHandle {
             "writing node {:?} at disk pos {} with length {}",
             n,
             candidate_pos,
-            total_n_size
+            n_size
         );
 
         // Write the node
@@ -928,9 +902,7 @@ impl TreeHandle {
         let mut left_n = create_internal_node();
         let mut right_n = create_internal_node();
 
-        let left_len = left_n.encoded_len();
-        let left_len_len = prost::length_delimiter_len(left_len);
-        let total_left_len = left_len + left_len_len;
+        let total_left_len = BTreeInternalNode::encoded_len();
 
         for (k, v) in left {
             if let Err(e) = insert_internal(&mut left_n, k, v) {
@@ -949,9 +921,7 @@ impl TreeHandle {
 
         // Create a new parent node
         let mut parent = create_internal_node();
-        let len = parent.encoded_len();
-        let len_len = prost::length_delimiter_len(len);
-        let total_parent_len = len + len_len;
+        let total_parent_len = BTreeInternalNode::encoded_len();
 
         if let Err(e) = insert_internal(
             &mut parent,

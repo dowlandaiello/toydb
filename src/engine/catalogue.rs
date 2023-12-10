@@ -133,7 +133,7 @@ impl Handler<GetEntry> for Catalogue {
 
                 // Decode the tuple into a catalogue entry, then return
                 let tup = Tuple::decode_length_delimited(record.data.as_slice())
-                    .map_err(|e| Error::DecodeError(e))?;
+                    .map_err(|_| Error::DecodeError)?;
                 tup.try_into()
             }
             .into_actor(self),
@@ -164,7 +164,7 @@ impl Handler<GetEntries> for Catalogue {
 
                 loop {
                     // Once there are no more tuples, stop
-                    let tup = if let Some(tup) = next {
+                    let tup: Tuple = if let Some(tup) = next {
                         tup
                     } else {
                         break;

@@ -1,5 +1,6 @@
 pub mod engine;
 pub mod error;
+pub mod owned_items;
 pub mod result;
 pub mod rpc;
 pub mod types;
@@ -11,3 +12,6 @@ pub mod items {
 
 /// The prefix name used to resolve XDG paths for configs and data.
 pub const XDG_APP_PREFIX: &str = "toydb";
+
+/// The number of children per node in the B+ tree
+pub const ORDER: usize = 4;

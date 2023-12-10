@@ -1,6 +1,5 @@
 use actix::MailboxError;
 use jsonrpc_v2::ErrorLike;
-use prost::{DecodeError, EncodeError};
 use sqlparser::parser::ParserError;
 use std::{error::Error as StdError, fmt};
 use tokio::io::Error as IoError;
@@ -16,8 +15,8 @@ pub enum Error {
     ConversionError,
     RecordNotFound,
     TraversalError,
-    DecodeError(DecodeError),
-    EncodeError(EncodeError),
+    DecodeError,
+    EncodeError,
     MiscDecodeError,
     InvalidKey,
     MultiplePrimaryKeyClauses,
@@ -50,8 +49,8 @@ impl fmt::Display for Error {
             Self::ConversionError => write!(f, "encountered a type conversion error"),
             Self::RecordNotFound => write!(f, "the record was not found in the page"),
             Self::TraversalError => write!(f, "failed to correctly traverse a tree structure"),
-            Self::DecodeError(e) => write!(f, "failed to decode a message with protobuf: {:?}", e),
-            Self::EncodeError(e) => write!(f, "failed to encode a message with protobuf: {:?}", e),
+            Self::DecodeError => write!(f, "failed to decode a message with simple encoding"),
+            Self::EncodeError => write!(f, "failed to encode a message with simple encoding"),
             Self::MiscDecodeError => write!(f, "failed to parse the message"),
             Self::InvalidKey => write!(f, "the value is not a valid key value"),
             Self::MultiplePrimaryKeyClauses => {
@@ -77,8 +76,6 @@ impl StdError for Error {
             Self::XdgError(e) => Some(e),
             Self::IoError(e) => Some(e),
             Self::MailboxError(e) => Some(e),
-            Self::DecodeError(e) => Some(e),
-            Self::EncodeError(e) => Some(e),
             Self::SqlParserError(e) => Some(e),
             Self::PageOutOfBounds
             | Self::MutexError
@@ -87,6 +84,8 @@ impl StdError for Error {
             | Self::TraversalError
             | Self::MiscDecodeError
             | Self::InvalidKey
+            | Self::EncodeError
+            | Self::DecodeError
             | Self::MultiplePrimaryKeyClauses
             | Self::MissingCatalogueEntry
             | Self::InvalidCondition
@@ -108,8 +107,8 @@ impl ErrorLike for Error {
             Self::ConversionError => 5,
             Self::RecordNotFound => 6,
             Self::TraversalError => 7,
-            Self::DecodeError(_) => 8,
-            Self::EncodeError(_) => 9,
+            Self::DecodeError => 8,
+            Self::EncodeError => 9,
             Self::MiscDecodeError => 10,
             Self::InvalidKey => 11,
             Self::MultiplePrimaryKeyClauses => 12,

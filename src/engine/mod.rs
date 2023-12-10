@@ -19,7 +19,7 @@ use index::{GetIndex, IndexPool, InsertKey, Iter};
 use iterator::Next;
 
 use actix::{Actor, Addr, AsyncContext, Context, Handler, ResponseActFuture, WrapFuture};
-use prost::Message;
+use prost::Message as ProstMesssage;
 use sqlparser::{
     ast::{Expr, Ident, SelectItem, SetExpr, Statement, TableFactor},
     dialect::PostgreSqlDialect,

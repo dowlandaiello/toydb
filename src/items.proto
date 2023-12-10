@@ -7,23 +7,6 @@ message RecordId {
 	fixed64 page_idx = 2;
 }
 
-message RecordIdPointer {
-	bool is_empty = 1;
-	fixed64 page = 2;
-	fixed64 page_idx = 3;
-}
-
-message BTreeInternalNode {
-	bool is_leaf_node = 1;
-	repeated fixed64 keys_pointers = 2 [packed = true];
-}
-
-message BTreeLeafNode {
-	bool is_leaf_node = 1;
-	repeated fixed64 keys = 2 [packed = true];
-	repeated RecordIdPointer disk_pointers = 3;
-}
-
 message Record {
 	fixed64 size = 1;
 	bytes data = 2;

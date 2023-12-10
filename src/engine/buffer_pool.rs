@@ -153,8 +153,8 @@ impl Handler<LoadPage> for DbHandle {
                 .map_err(|e| Error::IoError(e))?;
 
             // Decode the page (size delimited)
-            let page = Page::decode_length_delimited(buff.as_slice())
-                .map_err(|e| Error::DecodeError(e))?;
+            let page =
+                Page::decode_length_delimited(buff.as_slice()).map_err(|_| Error::DecodeError)?;
             Ok(page)
         }
         .into_actor(self)
