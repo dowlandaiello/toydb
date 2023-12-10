@@ -1506,6 +1506,7 @@ mod tests {
             .start();
 
             let mut rng = rand::thread_rng();
+            let mut k_v = Vec::new();
 
             // Insert a shitton of random keys
             for i in 0..100 {

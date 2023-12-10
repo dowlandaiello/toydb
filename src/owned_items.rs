@@ -1,11 +1,21 @@
 use super::{error::Error, ORDER};
 use std::mem;
 
-#[derive(Default, Debug, Clone, Copy)]
+#[derive(Debug, Clone, Copy, PartialEq)]
 pub struct RecordIdPointer {
     pub is_empty: bool,
     pub page: u64,
     pub page_idx: u64,
+}
+
+impl Default for RecordIdPointer {
+    fn default() -> Self {
+        Self {
+            is_empty: true,
+            page: 0,
+            page_idx: 0,
+        }
+    }
 }
 
 impl RecordIdPointer {
@@ -163,7 +173,7 @@ impl BTreeLeafNode {
                 .try_into()
                 .map_err(|_| Error::DecodeError)?;
             let ridp = RecordIdPointer::decode_length_delimited(&ridp_bytes)?;
-            disk_pointers[i] = ridp;
+            disk_pointers[j] = ridp;
         }
 
         Ok(Self {
@@ -171,5 +181,66 @@ impl BTreeLeafNode {
             keys,
             disk_pointers,
         })
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_encode_decode_internal_node() {
+        let keys_pointers: [u64; ORDER * 2 + 1] = rand::random();
+
+        let n = BTreeInternalNode {
+            is_leaf_node: false,
+            keys_pointers,
+        };
+
+        let enc = n.encode_length_delimited_to_vec();
+        let dec = BTreeInternalNode::decode_length_delimited(enc.as_slice()).unwrap();
+
+        assert_eq!(dec.is_leaf_node, n.is_leaf_node);
+        assert_eq!(dec.keys_pointers, n.keys_pointers);
+    }
+
+    #[test]
+    fn test_encode_deccode_record_id_pointers() {
+        let ridp = RecordIdPointer {
+            is_empty: false,
+            page: 10,
+            page_idx: 20,
+        };
+
+        let enc = ridp.encode_length_delimited_to_vec();
+        let dec = RecordIdPointer::decode_length_delimited(enc.as_slice()).unwrap();
+
+        assert_eq!(dec.is_empty, ridp.is_empty);
+        assert_eq!(dec.page, ridp.page);
+        assert_eq!(dec.page_idx, ridp.page_idx);
+    }
+
+    #[test]
+    fn test_encode_decode_leaf_node() {
+        let keys: [u64; ORDER] = rand::random();
+        let mut disk_pointers: [RecordIdPointer; ORDER] = [RecordIdPointer::default(); ORDER];
+        disk_pointers[0] = RecordIdPointer {
+            is_empty: false,
+            page: 9,
+            page_idx: 10,
+        };
+
+        let node = BTreeLeafNode {
+            is_leaf_node: true,
+            keys,
+            disk_pointers,
+        };
+
+        let enc = node.encode_length_delimited_to_vec();
+        let dec = BTreeLeafNode::decode_length_delimited(enc.as_slice()).unwrap();
+
+        assert_eq!(dec.is_leaf_node, node.is_leaf_node);
+        assert_eq!(dec.keys, node.keys);
+        assert_eq!(dec.disk_pointers, node.disk_pointers);
     }
 }
