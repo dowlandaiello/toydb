@@ -10,6 +10,10 @@ pub mod items {
     include!(concat!(env!("OUT_DIR"), "/toydb.items.rs"));
 }
 
+pub mod btree_capnp {
+    include!(concat!(env!("OUT_DIR"), "/btree_capnp.rs"));
+}
+
 /// The prefix name used to resolve XDG paths for configs and data.
 pub const XDG_APP_PREFIX: &str = "toydb";
 

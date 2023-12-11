@@ -155,7 +155,13 @@ fn pos_last_entry_lt(node: &BTreeInternalNode, key: u64) -> Option<usize> {
         .filter(|(i, x)| **x != 0 && i % 2 != 0 && **x < key)
         .map(|(i, _)| i)
         .last()
-        .map(|pos| pos + 1)
+        .map(|pos| {
+            if node.keys_pointers[pos + 1] != 0 {
+                pos + 1
+            } else {
+                pos
+            }
+        })
 }
 
 /// Inserts the key and value into the btree node, if space exists.
@@ -180,6 +186,22 @@ fn insert_internal(node: &mut BTreeInternalNode, k: SearchKey, v: u64) -> Result
 
     for (i, key) in node.keys_pointers.iter().enumerate() {
         if i % 2 == 0 {
+            // This value already exists.
+            if key.clone() == v {
+                match k {
+                    SearchKey::Lt(x) => {
+                        pos_insert = Some(i);
+
+                        break;
+                    }
+                    SearchKey::Gt(x) => {
+                        pos_insert = Some(i);
+
+                        break;
+                    }
+                }
+            }
+
             continue;
         }
 
@@ -201,8 +223,6 @@ fn insert_internal(node: &mut BTreeInternalNode, k: SearchKey, v: u64) -> Result
         }
     }
 
-    let mut keys_pointers = node.keys_pointers.to_vec();
-
     match pos_insert {
         Some(pos_insert) => {
             tracing::debug!("key already exists; inserting in position {}", pos_insert);
@@ -215,7 +235,10 @@ fn insert_internal(node: &mut BTreeInternalNode, k: SearchKey, v: u64) -> Result
             if len_keys < ORDER && len_children <= ORDER {
                 match k {
                     SearchKey::Lt(k) => {
-                        let pos_insert = pos_last_entry_lt(&node, k).unwrap_or(0);
+                        let pos_insert = get_internal(node, SearchKey::Lt(k))
+                            .or_else(|| if len_keys == 0 { Some(0) } else { None })
+                            .map(|pos| pos as usize)
+                            .ok_or(Error::TraversalError)?;
 
                         tracing::debug!(
                             "inserting in less than position in {:?} at {}",
@@ -230,15 +253,21 @@ fn insert_internal(node: &mut BTreeInternalNode, k: SearchKey, v: u64) -> Result
                             return Ok(());
                         }
 
+                        let mut keys_pointers = node.keys_pointers.to_vec();
+
                         // Insert in Lt pos
-                        keys_pointers.insert(pos_insert + 2, k);
+                        keys_pointers.insert(pos_insert + 1, k);
                         keys_pointers.insert(pos_insert + 1, v);
                         keys_pointers.resize_with(ORDER * 2 + 1, Default::default);
+
                         node.keys_pointers =
-                            keys_pointers.try_into().map_err(|_| Error::EncodeError)?;
+                            keys_pointers.try_into().map_err(|_| Error::DecodeError)?;
                     }
                     SearchKey::Gt(k) => {
-                        let pos_insert = pos_last_entry_lt(&node, k).unwrap_or(0);
+                        let pos_insert = get_internal(node, SearchKey::Gt(k))
+                            .or_else(|| if len_keys == 0 { Some(0) } else { None })
+                            .map(|pos| pos as usize)
+                            .ok_or(Error::TraversalError)?;
 
                         tracing::debug!(
                             "inserting in GYATT position in {:?} at {}",
@@ -254,12 +283,15 @@ fn insert_internal(node: &mut BTreeInternalNode, k: SearchKey, v: u64) -> Result
                             return Ok(());
                         }
 
+                        let mut keys_pointers = node.keys_pointers.to_vec();
+
                         // Insert in gt pos
                         keys_pointers.insert(pos_insert + 1, k);
                         keys_pointers.insert(pos_insert + 2, v);
                         keys_pointers.resize_with(ORDER * 2 + 1, Default::default);
+
                         node.keys_pointers =
-                            keys_pointers.try_into().map_err(|_| Error::EncodeError)?;
+                            keys_pointers.try_into().map_err(|_| Error::DecodeError)?;
                     }
                 }
 
@@ -406,26 +438,88 @@ fn right_values_internal(node: &BTreeInternalNode) -> Vec<(SearchKey, u64)> {
 fn get_internal(node: &BTreeInternalNode, k: SearchKey) -> Option<u64> {
     let mut pos = None;
 
-    for (i, key) in node.keys_pointers.iter().enumerate() {
+    let len = len_internal_child_pointers(node) + len_internal_keys(node);
+
+    tracing::debug!("searching for key {:?} in haystack of length {}", k, len);
+
+    for i in 0..len {
         if i % 2 == 0 {
             continue;
         }
 
+        let key = &node.keys_pointers[i];
+        let peek_f =
+            node.keys_pointers
+                .get(i + 2)
+                .and_then(|peek| if peek == &0 { None } else { Some(peek) });
+        let peek_b = if i >= 2 {
+            node.keys_pointers
+                .get(i - 2)
+                .and_then(|peek| if peek == &0 { None } else { Some(peek) })
+        } else {
+            None
+        };
+
+        tracing::debug!(
+            "at key {} with peek_f {:?} and peek_b {:?}",
+            key,
+            peek_f,
+            peek_b
+        );
+
         match k {
             SearchKey::Gt(x) => {
-                if x == key.clone() {
-                    pos = Some(i + 1);
+                // If this key is less than x and the next key is greater than it
+                // we've found our spot
+
+                // Alternatively, if this is the last key and it's less than us,
+                // that means we've DEFINITELY found it
+                match peek_f {
+                    Some(peek) => {
+                        if key <= &x && peek > &x {
+                            pos = Some(i + 1);
+                        }
+                    }
+                    None => {
+                        if key <= &x {
+                            pos = Some(i + 1);
+
+                            break;
+                        }
+                    }
                 }
             }
             SearchKey::Lt(x) => {
-                if x == key.clone() {
-                    pos = Some(i - 1);
+                // If this key is greater than x and the previous key is less than it
+                // we've found our spot
+
+                // Alternatively, if this is the first key and it's greater than us,
+                // that means we've DEFINITELy found it
+                match peek_b {
+                    Some(peek) => {
+                        if key > &x && peek <= &x {
+                            pos = Some(i - 1);
+
+                            break;
+                        }
+                    }
+                    None => {
+                        if key >= &x {
+                            pos = Some(i - 1);
+
+                            break;
+                        }
+                    }
                 }
             }
         }
     }
 
-    pos.map(|pos| node.keys_pointers[pos])
+    pos.map(|pos| pos as u64)
+}
+
+fn get_internal_val(node: &BTreeInternalNode, k: SearchKey) -> Option<u64> {
+    get_internal(node, k).and_then(|pos| node.keys_pointers.get(pos as usize).cloned())
 }
 
 /// Retrieves a list of the values less than the median value in the node's keys.
@@ -557,7 +651,7 @@ fn follow_node(
             node
         );
 
-        let next = if let Some(n) = get_internal(&node, SearchKey::Gt(key)) {
+        let next = if let Some(n) = get_internal_val(&node, SearchKey::Gt(key)) {
             tracing::debug!("found next node to probe for key {}: {:?}", key, n);
 
             n
@@ -884,6 +978,14 @@ impl TreeHandle {
                 }
             };
 
+        // Insert the parent in its original spot
+        let insertion_pos = match f.seek(SeekFrom::End(0)).await {
+            Ok(v) => v,
+            Err(e) => {
+                return Err((Error::IoError(e), f));
+            }
+        };
+
         let n = match candidate_internal_node {
             Some(SearchResult::InternalNode(n)) => n,
             _ => {
@@ -921,19 +1023,14 @@ impl TreeHandle {
 
         // Create a new parent node
         let mut parent = create_internal_node();
-        let total_parent_len = BTreeInternalNode::encoded_len();
 
-        if let Err(e) = insert_internal(
-            &mut parent,
-            SearchKey::Lt(med),
-            candidate_pos as u64 + total_parent_len as u64,
-        ) {
+        if let Err(e) = insert_internal(&mut parent, SearchKey::Lt(med), insertion_pos as u64) {
             return Err((e, f));
         }
         if let Err(e) = insert_internal(
             &mut parent,
             SearchKey::Gt(med),
-            candidate_pos as u64 + total_parent_len as u64 + total_left_len as u64,
+            insertion_pos as u64 + total_left_len as u64,
         ) {
             return Err((e, f));
         }
@@ -1318,11 +1415,11 @@ mod tests {
         insert_internal(&mut node, SearchKey::Lt(9), 8).unwrap();
         tracing::info!("successfuly inserted test keys: {:?}", node.keys_pointers);
 
-        assert_eq!(get_internal(&node, SearchKey::Lt(2)), Some(1));
-        assert_eq!(get_internal(&node, SearchKey::Lt(4)), Some(3));
-        assert_eq!(get_internal(&node, SearchKey::Gt(4)), Some(5));
-        assert_eq!(get_internal(&node, SearchKey::Lt(6)), Some(5));
-        assert_eq!(get_internal(&node, SearchKey::Lt(8)), Some(7));
+        assert_eq!(get_internal_val(&node, SearchKey::Lt(2)), Some(1));
+        assert_eq!(get_internal_val(&node, SearchKey::Lt(4)), Some(3));
+        assert_eq!(get_internal_val(&node, SearchKey::Gt(4)), Some(5));
+        assert_eq!(get_internal_val(&node, SearchKey::Lt(6)), Some(5));
+        assert_eq!(get_internal_val(&node, SearchKey::Lt(8)), Some(7));
     }
 
     #[traced_test]
@@ -1487,6 +1584,7 @@ mod tests {
     #[actix::test]
     async fn test_insert_key() {
         use rand::Rng;
+        use std::collections::HashSet;
         use tokio::fs::OpenOptions;
 
         async fn insert_key() -> Option<()> {
@@ -1507,14 +1605,17 @@ mod tests {
 
             let mut rng = rand::thread_rng();
             let mut k_v = Vec::new();
+            let mut used_values = HashSet::new();
 
             // Insert a shitton of random keys
             for i in 0..100 {
                 let mut k: u64 = rng.gen();
 
-                while k == 0 {
+                while k == 0 || used_values.contains(&k) {
                     k = rng.gen();
                 }
+
+                used_values.insert(k);
 
                 tracing::info!("\n\n\ninserting {}", i);
 
@@ -1529,6 +1630,7 @@ mod tests {
                 tracing::info!("\n\n\nchecking consistency after write {}", i);
 
                 for (k, v) in k_v.iter() {
+                    tracing::info!("checking consistency for {:?}", k);
                     let record = tree_handle.send(GetKey(k.clone())).await.ok()?.ok()?;
                     assert_eq!(record.page, v.page);
                     assert_eq!(record.page_idx, v.page_idx);
