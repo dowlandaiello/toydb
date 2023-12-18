@@ -158,6 +158,15 @@ pub enum Ty {
     Integer,
 }
 
+impl From<Ty> for String {
+    fn from(t: Ty) -> Self {
+        match t {
+            Ty::String => String::from("string"),
+            Ty::Integer => String::from("integer"),
+        }
+    }
+}
+
 impl From<DataType> for Ty {
     fn from(d: DataType) -> Self {
         match d {
@@ -171,12 +180,12 @@ impl TryFrom<Vec<u8>> for Ty {
     type Error = Error;
 
     fn try_from(bytes: Vec<u8>) -> Result<Self, Error> {
-        let v = bytes[0];
+        let v_str = String::from_utf8(bytes).map_err(|_| Error::DecodeError)?;
 
-        match v {
-            0 => Ok(Self::String),
-            1 => Ok(Self::Integer),
-            _ => Err(Error::MiscDecodeError),
+        match v_str.as_str() {
+            "string" => Ok(Self::String),
+            "integer" => Ok(Self::Integer),
+            _ => Err(Error::DecodeError),
         }
     }
 }
@@ -232,23 +241,29 @@ impl TryFrom<Tuple> for CatalogueEntry {
         let attr_name =
             String::from_utf8(tup.elements.remove(0).data).map_err(|_| Error::MiscDecodeError)?;
 
-        let attr_index_bytes: [u8; mem::size_of::<usize>()] = tup
+        let attr_index_bytes: [u8; mem::size_of::<i64>()] = tup
             .elements
             .remove(0)
             .data
             .try_into()
             .map_err(|_| Error::MiscDecodeError)?;
-        let attr_index: usize = usize::from_le_bytes(attr_index_bytes);
+        let attr_index: i64 = i64::from_le_bytes(attr_index_bytes);
 
         let ty = tup.elements.remove(0).data.try_into()?;
-        let primary_key: bool = tup.elements.remove(0).data[0] != 0;
+        let primary_key_bytes: [u8; mem::size_of::<i64>()] = tup
+            .elements
+            .remove(0)
+            .data
+            .try_into()
+            .map_err(|_| Error::MiscDecodeError)?;
+        let primary_key = i64::from_le_bytes(primary_key_bytes) != 0;
 
         Ok(Self {
             table_name,
             file_name,
             index_name,
             attr_name,
-            attr_index,
+            attr_index: attr_index as usize,
             ty,
             primary_key,
         })
@@ -257,16 +272,13 @@ impl TryFrom<Tuple> for CatalogueEntry {
 
 impl From<CatalogueEntry> for Tuple {
     fn from(cat: CatalogueEntry) -> Self {
-        let table_name = cat.table_name.into_bytes();
-        let file_name = cat.file_name.into_bytes();
-        let index_name = cat
-            .index_name
-            .map(|name| name.into_bytes())
-            .unwrap_or_default();
-        let attr_name = cat.attr_name.into_bytes();
-        let attr_index = cat.attr_index.to_le_bytes().to_vec();
-        let ty = cat.ty.into();
-        let primary_key: u8 = cat.primary_key.into();
+        let table_name = Value::String(cat.table_name).into();
+        let file_name = Value::String(cat.file_name).into();
+        let index_name = Value::String(cat.index_name.unwrap_or_default()).into();
+        let attr_name = Value::String(cat.attr_name).into();
+        let attr_index = Value::Integer(cat.attr_index as i64).into();
+        let ty = Value::String(cat.ty.into()).into();
+        let primary_key = Value::Integer(cat.primary_key as i64).into();
 
         Tuple {
             rel_name: fs::CATALOGUE_TABLE_NAME.to_owned(),
@@ -277,9 +289,7 @@ impl From<CatalogueEntry> for Tuple {
                 Element { data: attr_name },
                 Element { data: attr_index },
                 Element { data: ty },
-                Element {
-                    data: vec![primary_key],
-                },
+                Element { data: primary_key },
             ],
         }
     }

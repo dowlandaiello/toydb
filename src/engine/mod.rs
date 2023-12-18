@@ -16,7 +16,7 @@ use cmd::{
 };
 use heap::{GetHeap, HeapHandle, HeapPool, InsertRecord, Iter as HeapIter};
 use index::{GetIndex, IndexPool, InsertKey, Iter};
-use iterator::Next;
+use iterator::{Iterator, Next};
 
 use actix::{Actor, Addr, AsyncContext, Context, Handler, ResponseActFuture, WrapFuture};
 use prost::Message as ProstMesssage;
@@ -118,7 +118,10 @@ impl Engine {
                     ),
                     attr_name: attr.to_owned(),
                     attr_index: i,
-                    ty: Ty::String,
+                    ty: match attr {
+                        "primary_key" | "attr_index" => Ty::Integer,
+                        _ => Ty::String,
+                    },
                     primary_key: attr == "file_name" || attr == "table_name" || attr == "attr_name",
                 })
             });
@@ -384,14 +387,13 @@ impl Handler<Select> for Engine {
                     );
 
                     // Get an iterator over the index
-                    let iter = idx
+                    let mut iter = idx
                         .send(Iter(db_handle))
                         .await
                         .map_err(|e| Error::MailboxError(e))??;
 
                     // Keep polling the iterator for results until none are left
-                    let mut next: Option<Tuple> =
-                        iter.send(Next).await.map_err(|e| Error::MailboxError(e))?;
+                    let mut next: Option<Tuple> = iter.next().await;
 
                     loop {
                         let n = if let Some(next) = next {
@@ -404,7 +406,7 @@ impl Handler<Select> for Engine {
 
                         untyped_results.push(n);
 
-                        next = iter.send(Next).await.map_err(|e| Error::MailboxError(e))?;
+                        next = iter.next().await;
                     }
                 } else {
                     // Get an iterator over the heap
@@ -500,8 +502,6 @@ impl Handler<Project> for Engine {
     #[tracing::instrument]
     fn handle(&mut self, msg: Project, _ctx: &mut Context<Self>) -> Self::Result {
         tracing::info!("projecting {} tuples", msg.input.len());
-
-        let catalogue = self.catalogue.clone();
 
         Box::pin(
             async move {

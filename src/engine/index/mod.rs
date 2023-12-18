@@ -1,3 +1,4 @@
+pub mod mem_tree;
 pub mod tree;
 
 use super::{
@@ -5,11 +6,15 @@ use super::{
     buffer_pool::{DbHandle, PAGE_SIZE},
 };
 use actix::{
-    Actor, ActorTryFutureExt, Addr, Context, Handler, Message, ResponseActFuture, ResponseFuture,
-    WrapFuture,
+    Actor, ActorTryFutureExt, Addr, Context, Handler, Message, ResponseActFuture, WrapFuture,
 };
-use std::{collections::HashMap, future, sync::Arc};
-use tokio::{fs::OpenOptions, sync::Mutex};
+use mem_tree::RecordIdPointer;
+use std::{
+    collections::{BTreeMap, HashMap},
+    future,
+    sync::Arc,
+};
+use tokio::{fs::OpenOptions, io::AsyncReadExt, sync::Mutex};
 use tree::{TreeHandle, TreeHandleIterator};
 
 /// 4 pages can fit in an index cache
@@ -32,7 +37,7 @@ pub struct InsertKey(pub u64, pub RecordId);
 
 /// A message requesting that an actor create a new iterator.
 #[derive(Message, Debug)]
-#[rtype(result = "Result<Addr<TreeHandleIterator>, Error>")]
+#[rtype(result = "Result<TreeHandleIterator, Error>")]
 pub struct Iter(pub Addr<DbHandle>);
 
 /// An open abstraction representing a cached index for a database.
@@ -119,7 +124,7 @@ impl Handler<InsertKey> for IndexHandle {
 }
 
 impl Handler<Iter> for IndexHandle {
-    type Result = ResponseActFuture<Self, Result<Addr<TreeHandleIterator>, Error>>;
+    type Result = ResponseActFuture<Self, Result<TreeHandleIterator, Error>>;
 
     #[tracing::instrument]
     fn handle(&mut self, msg: Iter, _ctx: &mut Context<Self>) -> Self::Result {
@@ -169,21 +174,28 @@ impl Handler<GetIndex> for IndexPool {
 
         // Open the database file, or create it if it doesn't exist
         let open_fut = async move {
-            let f = OpenOptions::new()
+            let mut f = OpenOptions::new()
                 .read(true)
                 .write(true)
                 .create(true)
                 .open(db_path)
-                .await?;
-            let meta = f.metadata().await?;
+                .await
+                .map_err(|e| Error::IoError(e))?;
+            let mut contents = Vec::new();
+            f.read_to_end(&mut contents)
+                .await
+                .map_err(|e| Error::IoError(e))?;
 
-            Ok((f, meta))
+            Ok(
+                bincode::deserialize::<BTreeMap<u64, RecordIdPointer>>(contents.as_slice())
+                    .unwrap_or(BTreeMap::new()),
+            )
         }
         .into_actor(self)
-        .map_ok(|(f, _), slf, _ctx| {
+        .map_ok(|tree, slf, _ctx| {
             let tree_handle = TreeHandle {
-                handle: Arc::new(Mutex::new(f)),
-                seekers: Arc::new(Mutex::new(HashMap::new())),
+                table_name: msg.0.clone(),
+                tree,
             }
             .start();
 
@@ -197,8 +209,7 @@ impl Handler<GetIndex> for IndexPool {
             slf.indexes.insert(msg.0, act.clone());
 
             act
-        })
-        .map_err(|e, _, _| Error::IoError(e));
+        });
 
         Box::pin(open_fut)
     }
