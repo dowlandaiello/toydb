@@ -21,7 +21,7 @@ use iterator::{Iterator, Next};
 use actix::{Actor, Addr, AsyncContext, Context, Handler, ResponseActFuture, WrapFuture};
 use prost::Message as ProstMesssage;
 use sqlparser::{
-    ast::{Expr, Ident, SelectItem, SetExpr, Statement, TableFactor},
+    ast::{Expr, Ident, JoinConstraint, JoinOperator, SelectItem, SetExpr, Statement, TableFactor},
     dialect::PostgreSqlDialect,
     parser::Parser,
 };
@@ -537,7 +537,7 @@ impl Handler<Join> for Engine {
 
         // Get the columns to join on
         let (a, b) = match cond {
-            Cmp::Eq(Comparator::Col(a), Comparator::Col(b)) => (a, b),
+            Cmp::Eq(Comparator::Col { column: a, .. }, Comparator::Col { column: b, .. }) => (a, b),
             _ => {
                 return Err(Error::InvalidCondition);
             }
@@ -850,27 +850,137 @@ impl Handler<ExecuteQuery> for Engine {
                         // TODO: There is absolutely zero query optimization here.
                         Statement::Query(q) => match *q.body {
                             SetExpr::Select(s) => {
-                                let mut in_tuples: Vec<Vec<LabeledTypedTuple>> = Vec::new();
+                                let mut in_tuples: HashMap<String, Vec<LabeledTypedTuple>> =
+                                    HashMap::new();
                                 let selection =
                                     s.selection.map(|s| Cmp::try_from_sql(s)).transpose()?;
 
                                 for table in s.from {
-                                    match table.relation {
-                                        TableFactor::Table { mut name, .. } => {
-                                            let mut tuples = addr
+                                    for j in table.joins {
+                                        tracing::debug!("found join: {:?}", j);
+
+                                        match j.join_operator {
+                                            JoinOperator::Inner(constr) => match constr {
+                                                JoinConstraint::On(expr) => {
+                                                    tracing::debug!("executing join: {:?}", expr);
+
+                                                    let cmp = Cmp::try_from_sql(expr)?;
+
+                                                    let in_join_tups = match &cmp {
+                                                        Cmp::Eq(
+                                                            Comparator::Col { table: a, column: a_col },
+                                                            Comparator::Col { table: b, column: b_col },
+                                                        ) => ((a, a_col), (b, b_col)),
+                                                        Cmp::Gt(
+                                                            Comparator::Col { table: a, column: a_col },
+                                                            Comparator::Col { table: b, column: b_col },
+                                                        ) => ((a, a_col), (b, b_col)),
+                                                        Cmp::Lt(
+                                                            Comparator::Col { table: a, column: a_col },
+                                                            Comparator::Col { table: b, column: b_col },
+                                                        ) => ((a, a_col), (b, b_col)),
+                                                        Cmp::Ne(
+                                                            Comparator::Col { table: a, column: a_col },
+                                                            Comparator::Col { table: b, column: b_col },
+                                                        ) => ((a, a_col), (b, b_col)),
+                                                        o => {
+                                                            return Err(Error::Unimplemented(
+                                                                Some(format!("{:?}", o)),
+                                                            ));
+                                                        }
+                                                    };
+
+													tracing::debug!("searching for input relations {:?} and {:?} in input tuples {:?}", in_join_tups.0, in_join_tups.1, in_tuples);
+
+                                                    let (input_1, input_2) = {
+                                                        (if let Some(in_1) = in_tuples
+                                                            .get(in_join_tups.0.0.as_ref().ok_or(Error::JoinColumnNotFound)?) {
+																in_1.clone()
+															} else {
+																addr
                                                 .send(Select {
                                                     db_name: msg.db_name.clone(),
-                                                    table_name: name.0.remove(0).value,
+                                                    table_name: in_join_tups.0.0.as_ref().ok_or(Error::JoinColumnNotFound)?.clone(),
+                                                    filter: selection.clone(),
+                                                })
+                                                .await
+                                                .map_err(|e| Error::MailboxError(e))??
+															},
+
+                                                        if let Some(in_2) = in_tuples
+                                                            .get(in_join_tups.1.0.as_ref().ok_or(Error::JoinColumnNotFound)?)
+                                                            {
+																in_2.clone()
+															} else {
+																let tuples = addr
+                                                .send(Select {
+                                                    db_name: msg.db_name.clone(),
+													table_name: in_join_tups.1.0.as_ref().ok_or(Error::JoinColumnNotFound)?.clone(),
                                                     filter: selection.clone(),
                                                 })
                                                 .await
                                                 .map_err(|e| Error::MailboxError(e))??;
 
-                                            // If there is a projection, execute it
-                                            if s.projection.is_empty() {
-                                                in_tuples.push(tuples);
+																tuples
+															})
+                                                    };
 
-                                                continue;
+                                                    tracing::debug!("found input relations for join: {:?}, {:?}", input_1, input_2);
+
+                                                    let joined = addr
+                                                        .send(Join {
+                                                            input_1,
+                                                            input_2,
+                                                            cond: cmp.clone(),
+                                                        })
+                                                        .await
+                                                        .map_err(|e| Error::MailboxError(e))??;
+                                                    in_tuples.insert(
+                                                        format!(
+                                                            "{}_{}",
+                                                            in_join_tups.0.0.as_ref().ok_or(Error::JoinColumnNotFound)?, in_join_tups.1.0.as_ref().ok_or(Error::JoinColumnNotFound)?
+                                                        ),
+                                                        joined,
+                                                    );
+                                                }
+                                                o => {
+                                                    return Err(Error::Unimplemented(Some(
+                                                        format!("{:?}", o),
+                                                    )));
+                                                }
+                                            },
+                                            o => {
+                                                return Err(Error::Unimplemented(Some(format!(
+                                                    "{:?}",
+                                                    o
+                                                ))));
+                                            }
+                                        }
+                                    }
+
+                                    match table.relation {
+                                        TableFactor::Table {
+                                            mut name, alias, ..
+                                        } => {
+                                            let table_name = name.0.remove(0).value;
+                                            let mut tuples = addr
+                                                .send(Select {
+                                                    db_name: msg.db_name.clone(),
+                                                    table_name: table_name.clone(),
+                                                    filter: selection.clone(),
+                                                })
+                                                .await
+                                                .map_err(|e| Error::MailboxError(e))??;
+
+                                            let alias_normalized = alias
+                                                .map(|alias| alias.name.value)
+                                                .unwrap_or(table_name);
+
+                                            // If there is not a projection, do not execute it
+                                            if s.projection.is_empty() {
+                                                in_tuples.insert(alias_normalized, tuples);
+
+												continue;
                                             }
 
                                             let is_wildcard = match s.projection[0] {
@@ -880,7 +990,7 @@ impl Handler<ExecuteQuery> for Engine {
 
                                             // Selecting all columns
                                             if is_wildcard {
-                                                in_tuples.push(tuples);
+                                                in_tuples.insert(alias_normalized, tuples);
 
                                                 continue;
                                             }
@@ -927,7 +1037,7 @@ impl Handler<ExecuteQuery> for Engine {
                                                 .await
                                                 .map_err(|e| Error::MailboxError(e))??;
 
-                                            in_tuples.push(tuples);
+                                            in_tuples.insert(alias_normalized, tuples);
                                         }
                                         o => {
                                             return Err(Error::Unimplemented(Some(format!(
@@ -938,7 +1048,12 @@ impl Handler<ExecuteQuery> for Engine {
                                     }
                                 }
 
-                                results.append(&mut in_tuples);
+                                results.append(
+                                    &mut in_tuples
+                                        .drain()
+                                        .map(|(_, v)| v)
+                                        .collect::<Vec<Vec<LabeledTypedTuple>>>(),
+                                );
                             }
                             o => {
                                 return Err(Error::Unimplemented(Some(format!("{:?}", o))));

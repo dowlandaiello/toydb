@@ -144,14 +144,24 @@ impl Cmp {
 /// Items that can be compared.
 #[derive(Serialize, Deserialize, Debug, Clone)]
 pub enum Comparator {
-    Col(String),
+    Col {
+        column: String,
+        table: Option<String>,
+    },
     Val(Value),
 }
 
 impl Comparator {
     fn try_from_sql(e: Expr) -> Result<Self, Error> {
         match e {
-            Expr::Identifier(ident) => Ok(Self::Col(ident.value)),
+            Expr::Identifier(ident) => Ok(Self::Col {
+                column: ident.value,
+                table: None,
+            }),
+            Expr::CompoundIdentifier(mut parts) => Ok(Self::Col {
+                table: Some(parts.remove(0).value),
+                column: parts.remove(0).value,
+            }),
             Expr::Value(v) => Ok(Self::Val(v.try_into()?)),
             o => Err(Error::Unimplemented(Some(format!("{:?}", o)))),
         }
@@ -163,7 +173,7 @@ impl Comparator {
         attr_names: impl AsRef<[String]>,
     ) -> Option<Value> {
         match self {
-            Self::Col(c) => tup
+            Self::Col { column: c, .. } => tup
                 .0
                 .clone()
                 .into_iter()
